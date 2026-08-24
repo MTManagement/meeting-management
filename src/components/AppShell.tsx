@@ -8,6 +8,7 @@ import type { ReactNode } from "react";
 const TABS = [
   { href: "/", label: "동호회 소개" },
   { href: "/members", label: "회원 목록" },
+  { href: "/dues", label: "회비 납부현황" },
   { href: "/board", label: "게시판" },
   { href: "/schedule", label: "일정" },
 ];

@@ -7,12 +7,11 @@ export async function addMember(formData: FormData) {
   const name = (formData.get("name") as string)?.trim();
   const role = (formData.get("role") as string)?.trim() || "회원";
   const phone = (formData.get("phone") as string)?.trim();
-  const duesStatus = (formData.get("duesStatus") as string) || "미납";
 
   if (!name) return;
 
   await prisma.member.create({
-    data: { name, role, phone, duesStatus },
+    data: { name, role, phone },
   });
 
   revalidatePath("/members");

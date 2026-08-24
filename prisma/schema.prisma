@@ -11,10 +11,25 @@ datasource db {
 }
 
 model Member {
-  id         String   @id @default(cuid())
-  name       String
-  role       String
-  phone      String
-  duesStatus String
-  createdAt  DateTime @default(now())
+  id            String        @id @default(cuid())
+  name          String
+  role          String
+  phone         String
+  createdAt     DateTime      @default(now())
+  duesPayments  DuesPayment[]
+}
+
+// periodType: "YEARLY" | "HALF" | "QUARTER" | "MONTH" | "WEEK"
+// periodIndex: YEARLY=1 / HALF=1~2 / QUARTER=1~4 / MONTH=1~12 / WEEK=1~53
+model DuesPayment {
+  id          String   @id @default(cuid())
+  memberId    String
+  member      Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  year        Int
+  periodType  String
+  periodIndex Int
+  paid        Boolean  @default(false)
+  updatedAt   DateTime @updatedAt
+
+  @@unique([memberId, year, periodType, periodIndex])
 }

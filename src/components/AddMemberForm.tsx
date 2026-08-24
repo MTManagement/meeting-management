@@ -42,14 +42,6 @@ export default function AddMemberForm() {
             placeholder="연락처"
             className="rounded-md border border-gray-300 px-3 py-2 text-sm flex-1 min-w-[120px]"
           />
-          <select
-            name="duesStatus"
-            defaultValue="미납"
-            className="rounded-md border border-gray-300 px-3 py-2 text-sm"
-          >
-            <option value="완납">완납</option>
-            <option value="미납">미납</option>
-          </select>
           <button
             type="submit"
             className="rounded-md bg-gray-900 text-white text-sm px-4 py-2"

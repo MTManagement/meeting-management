@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import AddMemberForm from "@/components/AddMemberForm";
 import { deleteMember } from "./actions";
@@ -13,10 +14,17 @@ export default async function MembersPage() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">회원 목록</h1>
+        <Link
+          href="/dues"
+          className="text-sm text-gray-500 underline underline-offset-2 hover:text-gray-900"
+        >
+          회비 납부현황 관리 →
+        </Link>
       </div>
       <p className="text-gray-600 mb-4 text-sm">
         실제 DB에 저장되는 회원 목록입니다. 추후 사전 정의 템플릿 + 컬럼명
-        커스터마이징 기능이 붙을 예정입니다.
+        커스터마이징 기능이 붙을 예정입니다. 회비 납부현황은 별도 관리 화면에서
+        확인할 수 있습니다.
       </p>
 
       <div className="mb-4">
@@ -30,14 +38,13 @@ export default async function MembersPage() {
               <th className="px-4 py-3 font-medium">이름</th>
               <th className="px-4 py-3 font-medium">직책</th>
               <th className="px-4 py-3 font-medium">연락처</th>
-              <th className="px-4 py-3 font-medium">회비 납부현황</th>
               <th className="px-4 py-3 font-medium"></th>
             </tr>
           </thead>
           <tbody>
             {members.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-4 py-6 text-center text-gray-400">
+                <td colSpan={4} className="px-4 py-6 text-center text-gray-400">
                   등록된 회원이 없습니다. 위 버튼으로 회원을 추가해보세요.
                 </td>
               </tr>
@@ -47,17 +54,6 @@ export default async function MembersPage() {
                 <td className="px-4 py-3">{m.name}</td>
                 <td className="px-4 py-3">{m.role}</td>
                 <td className="px-4 py-3">{m.phone}</td>
-                <td className="px-4 py-3">
-                  <span
-                    className={`rounded-full px-2 py-0.5 text-xs ${
-                      m.duesStatus === "완납"
-                        ? "bg-green-100 text-green-700"
-                        : "bg-red-100 text-red-700"
-                    }`}
-                  >
-                    {m.duesStatus}
-                  </span>
-                </td>
                 <td className="px-4 py-3 text-right">
                   <form action={deleteMember}>
                     <input type="hidden" name="id" value={m.id} />
