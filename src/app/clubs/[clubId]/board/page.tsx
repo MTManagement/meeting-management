@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
+import { requireMembership } from "@/lib/auth";
 import CreateBoardForm from "@/components/CreateBoardForm";
 import { deleteBoard } from "./actions";
 
@@ -11,6 +12,7 @@ export default async function BoardPage({
   params: Promise<{ clubId: string }>;
 }) {
   const { clubId } = await params;
+  await requireMembership(clubId);
   const boards = await prisma.board.findMany({
     where: { clubId },
     orderBy: { createdAt: "asc" },

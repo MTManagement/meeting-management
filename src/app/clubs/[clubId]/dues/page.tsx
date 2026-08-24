@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { requireMembership } from "@/lib/auth";
 import DuesControls from "@/components/DuesControls";
 import { saveDues } from "./actions";
 import {
@@ -19,6 +20,7 @@ export default async function DuesPage({
   searchParams: Promise<{ year?: string; unit?: string }>;
 }) {
   const { clubId } = await params;
+  await requireMembership(clubId);
   const sp = await searchParams;
   const year = Number(sp.year) || new Date().getFullYear();
   const periodType: PeriodType = isPeriodType(sp.unit ?? "")

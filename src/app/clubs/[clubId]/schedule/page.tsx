@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
+import { requireMembership } from "@/lib/auth";
 import CreateEventForm from "@/components/CreateEventForm";
 import { deleteEvent } from "./actions";
 
@@ -21,6 +22,7 @@ export default async function SchedulePage({
   params: Promise<{ clubId: string }>;
 }) {
   const { clubId } = await params;
+  await requireMembership(clubId);
   const events = await prisma.event.findMany({
     where: { clubId },
     orderBy: { date: "asc" },

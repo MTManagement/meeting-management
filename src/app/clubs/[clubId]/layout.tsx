@@ -1,4 +1,4 @@
-import { notFound, redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
@@ -20,10 +20,9 @@ export default async function ClubLayout({
   const membership = await prisma.member.findFirst({
     where: { clubId, userId: user.id },
   });
-  if (!membership) redirect("/clubs");
 
   return (
-    <AppShell clubId={club.id} clubName={club.name}>
+    <AppShell clubId={club.id} clubName={club.name} isMember={!!membership}>
       {children}
     </AppShell>
   );

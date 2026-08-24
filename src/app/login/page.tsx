@@ -4,7 +4,7 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-200 px-4">
       <div className="w-full max-w-sm rounded-lg border border-gray-200 bg-white p-6">
-        <h1 className="text-xl font-bold mb-1">동호회 관리 플랫폼</h1>
+        <h1 className="text-xl font-bold mb-1">SNAPHY</h1>
         <p className="text-sm text-gray-500 mb-6">
           닉네임을 입력하고 시작해보세요. (임시 게스트 로그인 · 추후
           카카오/구글 로그인 지원 예정)

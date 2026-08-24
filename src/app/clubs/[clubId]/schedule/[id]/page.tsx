@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
+import { requireMembership } from "@/lib/auth";
 import { saveAttendance } from "../actions";
 
 export const dynamic = "force-dynamic";
@@ -23,6 +24,7 @@ export default async function EventDetailPage({
   params: Promise<{ clubId: string; id: string }>;
 }) {
   const { clubId, id } = await params;
+  await requireMembership(clubId);
 
   const event = await prisma.event.findUnique({ where: { id } });
   if (!event || event.clubId !== clubId) notFound();

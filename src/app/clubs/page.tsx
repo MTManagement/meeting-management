@@ -28,7 +28,7 @@ export default async function ClubsSearchPage({
   return (
     <div className="min-h-screen bg-slate-200">
       <div className="mx-auto max-w-xl px-4 py-10">
-        <Link href="/" className="text-sm text-gray-500 hover:underline">
+        <Link href="/home" className="text-sm text-gray-500 hover:underline">
           ← 내 모임
         </Link>
         <h1 className="text-xl font-bold mt-2 mb-4">모임 찾기</h1>

@@ -6,11 +6,17 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import { logout } from "@/app/login/actions";
 import DeleteClubButton from "@/components/DeleteClubButton";
+import JoinClubButton from "@/components/JoinClubButton";
+import LeaveClubButton from "@/components/LeaveClubButton";
 
-function getTabs(clubId: string) {
+function getTabs(clubId: string, isMember: boolean) {
   const base = `/clubs/${clubId}`;
+  const introTab = { href: base, label: "동호회 소개" };
+
+  if (!isMember) return [introTab];
+
   return [
-    { href: base, label: "동호회 소개" },
+    introTab,
     { href: `${base}/members`, label: "회원 목록" },
     { href: `${base}/dues`, label: "회비 납부현황" },
     { href: `${base}/board`, label: "게시판" },
@@ -20,13 +26,15 @@ function getTabs(clubId: string) {
 
 function NavLinks({
   clubId,
+  isMember,
   onNavigate,
 }: {
   clubId: string;
+  isMember: boolean;
   onNavigate?: () => void;
 }) {
   const pathname = usePathname();
-  const tabs = getTabs(clubId);
+  const tabs = getTabs(clubId, isMember);
 
   return (
     <nav className="flex flex-col p-2 gap-1">
@@ -51,13 +59,48 @@ function NavLinks({
   );
 }
 
+function Footer({ clubId, clubName, isMember }: { clubId: string; clubName: string; isMember: boolean }) {
+  if (!isMember) {
+    return (
+      <div className="p-2 border-t border-gray-100 space-y-2">
+        <JoinClubButton clubId={clubId} />
+        <form action={logout}>
+          <button
+            type="submit"
+            className="w-full text-left rounded-md px-3 py-2 text-xs text-gray-400 hover:bg-gray-100"
+          >
+            로그아웃
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-2 border-t border-gray-100 space-y-1">
+      <LeaveClubButton clubId={clubId} />
+      <DeleteClubButton clubId={clubId} clubName={clubName} />
+      <form action={logout}>
+        <button
+          type="submit"
+          className="w-full text-left rounded-md px-3 py-2 text-xs text-gray-400 hover:bg-gray-100"
+        >
+          로그아웃
+        </button>
+      </form>
+    </div>
+  );
+}
+
 export default function AppShell({
   clubId,
   clubName,
+  isMember,
   children,
 }: {
   clubId: string;
   clubName: string;
+  isMember: boolean;
   children: ReactNode;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -67,7 +110,7 @@ export default function AppShell({
       {/* 모바일 상단 바 */}
       <header className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-3 md:hidden">
         <div>
-          <Link href="/" className="text-xs text-gray-400 hover:underline">
+          <Link href="/home" className="text-xs text-gray-400 hover:underline">
             ← 내 모임
           </Link>
           <p className="font-semibold text-gray-900">{clubName}</p>
@@ -105,9 +148,13 @@ export default function AppShell({
                 ✕
               </button>
             </div>
-            <NavLinks clubId={clubId} onNavigate={() => setMenuOpen(false)} />
-            <div className="mt-auto p-2 border-t border-gray-100">
-              <DeleteClubButton clubId={clubId} clubName={clubName} />
+            <NavLinks
+              clubId={clubId}
+              isMember={isMember}
+              onNavigate={() => setMenuOpen(false)}
+            />
+            <div className="mt-auto">
+              <Footer clubId={clubId} clubName={clubName} isMember={isMember} />
             </div>
           </div>
         </div>
@@ -116,22 +163,14 @@ export default function AppShell({
       {/* 데스크톱 사이드바 */}
       <aside className="hidden w-56 shrink-0 border-r border-gray-200 bg-white md:flex md:flex-col">
         <div className="px-4 py-5 border-b border-gray-200">
-          <Link href="/" className="text-sm text-gray-400 hover:underline">
+          <Link href="/home" className="text-sm text-gray-400 hover:underline">
             ← 내 모임
           </Link>
           <p className="font-semibold text-gray-900">{clubName}</p>
         </div>
-        <NavLinks clubId={clubId} />
-        <div className="mt-auto p-2 border-t border-gray-100 space-y-1">
-          <DeleteClubButton clubId={clubId} clubName={clubName} />
-          <form action={logout}>
-            <button
-              type="submit"
-              className="w-full text-left rounded-md px-3 py-2 text-xs text-gray-400 hover:bg-gray-100"
-            >
-              로그아웃
-            </button>
-          </form>
+        <NavLinks clubId={clubId} isMember={isMember} />
+        <div className="mt-auto">
+          <Footer clubId={clubId} clubName={clubName} isMember={isMember} />
         </div>
       </aside>
 

@@ -57,6 +57,7 @@ export async function joinClub(formData: FormData) {
     },
   });
 
-  revalidatePath("/");
+  revalidatePath("/home");
+  revalidatePath(`/clubs/${clubId}`);
   redirect(`/clubs/${clubId}`);
 }

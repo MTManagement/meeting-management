@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
+import { requireMembership } from "@/lib/auth";
 import CreateCommentForm from "@/components/CreateCommentForm";
 
 export const dynamic = "force-dynamic";
@@ -21,6 +22,7 @@ export default async function PostDetailPage({
   params: Promise<{ clubId: string; boardId: string; postId: string }>;
 }) {
   const { clubId, boardId, postId } = await params;
+  await requireMembership(clubId);
 
   const [board, post] = await Promise.all([
     prisma.board.findUnique({ where: { id: boardId } }),

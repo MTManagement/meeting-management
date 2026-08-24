@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
+import { requireMembership } from "@/lib/auth";
 import CreatePostForm from "@/components/CreatePostForm";
 import { deletePost } from "../actions";
 
@@ -20,6 +21,7 @@ export default async function BoardDetailPage({
   params: Promise<{ clubId: string; boardId: string }>;
 }) {
   const { clubId, boardId } = await params;
+  await requireMembership(clubId);
 
   const board = await prisma.board.findUnique({ where: { id: boardId } });
   if (!board || board.clubId !== clubId) notFound();

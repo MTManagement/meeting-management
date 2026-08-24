@@ -19,7 +19,7 @@ export async function guestLogin(formData: FormData) {
     maxAge: 60 * 60 * 24 * 365,
   });
 
-  redirect("/");
+  redirect("/home");
 }
 
 export async function logout() {

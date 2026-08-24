@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "동호회 관리 플랫폼",
-  description: "동호회용 Notion - 회원관리·회비정산·일정·게시판",
+  title: "모임 관리 플랫폼",
+  description: "모임용 Notion - 회원관리·회비정산·일정·게시판",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
