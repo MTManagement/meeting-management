@@ -60,3 +60,34 @@ model Attendance {
 
   @@unique([eventId, memberId])
 }
+
+// type: "공지" | "자유"
+model Board {
+  id              String   @id @default(cuid())
+  name            String
+  type            String
+  allowMemberPost Boolean  @default(true)
+  anonymous       Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  posts           Post[]
+}
+
+model Post {
+  id         String    @id @default(cuid())
+  boardId    String
+  board      Board     @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  title      String
+  content    String
+  authorName String
+  createdAt  DateTime  @default(now())
+  comments   Comment[]
+}
+
+model Comment {
+  id         String   @id @default(cuid())
+  postId     String
+  post       Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  content    String
+  authorName String
+  createdAt  DateTime @default(now())
+}

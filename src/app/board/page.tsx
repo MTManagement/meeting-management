@@ -1,32 +1,63 @@
-const DUMMY_POSTS = [
-  { title: "8월 정기모임 공지", type: "공지", author: "총무" },
-  { title: "이번 주 등산 어디로 갈까요?", type: "자유", author: "김철수" },
-  { title: "다음 회식 메뉴 투표", type: "투표", author: "총무" },
-];
+import Link from "next/link";
+import { prisma } from "@/lib/prisma";
+import CreateBoardForm from "@/components/CreateBoardForm";
+import { deleteBoard } from "./actions";
 
-export default function BoardPage() {
+export const dynamic = "force-dynamic";
+
+export default async function BoardPage() {
+  const boards = await prisma.board.findMany({
+    orderBy: { createdAt: "asc" },
+    include: { _count: { select: { posts: true } } },
+  });
+
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">게시판</h1>
-        <button className="rounded-md bg-gray-900 text-white text-sm px-3 py-2">
-          + 게시판 만들기
-        </button>
       </div>
-      <p className="text-gray-600 mb-6 text-sm">
-        예시 게시글 목록입니다. 게시판별로 참여방식/익명여부/용도(공지·자유·투표)
-        옵션이 붙을 예정입니다.
+      <p className="text-gray-600 mb-4 text-sm">
+        용도(공지/자유), 글쓰기 권한, 익명 여부를 선택해서 게시판을 만들 수
+        있습니다.
       </p>
+
+      <div className="mb-4">
+        <CreateBoardForm />
+      </div>
+
       <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
-        {DUMMY_POSTS.map((post) => (
-          <div key={post.title} className="flex items-center justify-between px-4 py-3">
-            <div>
-              <p className="font-medium text-sm">{post.title}</p>
-              <p className="text-xs text-gray-400">{post.author}</p>
+        {boards.length === 0 && (
+          <div className="px-4 py-6 text-center text-gray-400 text-sm">
+            생성된 게시판이 없습니다. 위 버튼으로 게시판을 만들어보세요.
+          </div>
+        )}
+        {boards.map((board) => (
+          <div
+            key={board.id}
+            className="flex items-center justify-between px-4 py-3 gap-3"
+          >
+            <Link href={`/board/${board.id}`} className="min-w-0 flex-1">
+              <p className="font-medium text-sm truncate">{board.name}</p>
+              <p className="text-xs text-gray-400">
+                게시글 {board._count.posts}개
+                {board.anonymous ? " · 익명" : ""}
+                {board.allowMemberPost ? "" : " · 관리자만 작성"}
+              </p>
+            </Link>
+            <div className="flex items-center gap-3 shrink-0">
+              <span className="rounded-full bg-gray-100 text-gray-600 text-xs px-2 py-0.5">
+                {board.type}
+              </span>
+              <form action={deleteBoard}>
+                <input type="hidden" name="id" value={board.id} />
+                <button
+                  type="submit"
+                  className="text-xs text-gray-400 hover:text-red-600"
+                >
+                  삭제
+                </button>
+              </form>
             </div>
-            <span className="rounded-full bg-gray-100 text-gray-600 text-xs px-2 py-0.5">
-              {post.type}
-            </span>
           </div>
         ))}
       </div>
