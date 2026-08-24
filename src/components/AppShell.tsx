@@ -15,11 +15,11 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
 
   return (
-    <div className="flex min-h-screen w-full">
+    <div className="flex min-h-screen w-full bg-gray-50">
       <aside className="w-56 shrink-0 border-r border-gray-200 bg-white">
         <div className="px-4 py-5 border-b border-gray-200">
           <p className="text-sm text-gray-400">모임 이름 (가칭)</p>
-          <p className="font-semibold">우리 동호회</p>
+          <p className="font-semibold text-gray-900">우리 동호회</p>
         </div>
         <nav className="flex flex-col p-2 gap-1">
           {TABS.map((tab) => {
