@@ -11,12 +11,13 @@ datasource db {
 }
 
 model Member {
-  id            String        @id @default(cuid())
-  name          String
-  role          String
-  phone         String
-  createdAt     DateTime      @default(now())
-  duesPayments  DuesPayment[]
+  id           String        @id @default(cuid())
+  name         String
+  role         String
+  phone        String
+  createdAt    DateTime      @default(now())
+  duesPayments DuesPayment[]
+  attendances  Attendance[]
 }
 
 // periodType: "YEARLY" | "HALF" | "QUARTER" | "MONTH" | "WEEK"
@@ -32,4 +33,30 @@ model DuesPayment {
   updatedAt   DateTime @updatedAt
 
   @@unique([memberId, year, periodType, periodIndex])
+}
+
+model Event {
+  id           String       @id @default(cuid())
+  title        String
+  date         DateTime
+  location     String?
+  address      String?
+  fee          String?
+  maxAttendees Int?
+  description  String?
+  createdAt    DateTime     @default(now())
+  attendances  Attendance[]
+}
+
+// status: "참석" | "불참" | "미정"
+model Attendance {
+  id        String   @id @default(cuid())
+  eventId   String
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  memberId  String
+  member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  status    String   @default("미정")
+  updatedAt DateTime @updatedAt
+
+  @@unique([eventId, memberId])
 }

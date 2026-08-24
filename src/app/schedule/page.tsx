@@ -1,28 +1,73 @@
-const DUMMY_EVENTS = [
-  { date: "2026-08-30", title: "8월 정기모임", attendees: "12/20 참석" },
-  { date: "2026-09-06", title: "가을 등산 모임", attendees: "미응답" },
-];
+import Link from "next/link";
+import { prisma } from "@/lib/prisma";
+import CreateEventForm from "@/components/CreateEventForm";
+import { deleteEvent } from "./actions";
 
-export default function SchedulePage() {
+export const dynamic = "force-dynamic";
+
+function formatDate(date: Date) {
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+export default async function SchedulePage() {
+  const events = await prisma.event.findMany({
+    orderBy: { date: "asc" },
+  });
+
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">일정</h1>
-        <button className="rounded-md bg-gray-900 text-white text-sm px-3 py-2">
-          + 일정 등록
-        </button>
       </div>
-      <p className="text-gray-600 mb-6 text-sm">
-        예시 일정 목록입니다. 참석 여부 응답, 출석 체크 기능이 붙을 예정입니다.
+      <p className="text-gray-600 mb-4 text-sm">
+        일정을 등록하고, 각 일정별로 참석 여부를 관리할 수 있습니다.
       </p>
+
+      <div className="mb-4">
+        <CreateEventForm />
+      </div>
+
       <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
-        {DUMMY_EVENTS.map((event) => (
-          <div key={event.title} className="flex items-center justify-between px-4 py-3">
-            <div>
-              <p className="font-medium text-sm">{event.title}</p>
-              <p className="text-xs text-gray-400">{event.date}</p>
+        {events.length === 0 && (
+          <div className="px-4 py-6 text-center text-gray-400 text-sm">
+            등록된 일정이 없습니다. 위 버튼으로 일정을 추가해보세요.
+          </div>
+        )}
+        {events.map((event) => (
+          <div
+            key={event.id}
+            className="flex items-center justify-between px-4 py-3 gap-3"
+          >
+            <div className="min-w-0">
+              <p className="font-medium text-sm truncate">{event.title}</p>
+              <p className="text-xs text-gray-400">{formatDate(event.date)}</p>
+              {event.location && (
+                <p className="text-xs text-gray-400">장소: {event.location}</p>
+              )}
             </div>
-            <span className="text-xs text-gray-500">{event.attendees}</span>
+            <div className="flex items-center gap-3 shrink-0">
+              <Link
+                href={`/schedule/${event.id}`}
+                className="text-sm text-gray-500 underline underline-offset-2 hover:text-gray-900 whitespace-nowrap"
+              >
+                참석 관리
+              </Link>
+              <form action={deleteEvent}>
+                <input type="hidden" name="id" value={event.id} />
+                <button
+                  type="submit"
+                  className="text-xs text-gray-400 hover:text-red-600"
+                >
+                  삭제
+                </button>
+              </form>
+            </div>
           </div>
         ))}
       </div>
