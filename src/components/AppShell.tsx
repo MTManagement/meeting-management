@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { logout } from "@/app/login/actions";
+import DeleteClubButton from "@/components/DeleteClubButton";
 
 function getTabs(clubId: string) {
   const base = `/clubs/${clubId}`;
@@ -92,7 +93,7 @@ export default function AppShell({
             className="absolute inset-0 bg-black/40"
             onClick={() => setMenuOpen(false)}
           />
-          <div className="absolute left-0 top-0 h-full w-64 bg-white shadow-lg">
+          <div className="absolute left-0 top-0 h-full w-64 bg-white shadow-lg flex flex-col">
             <div className="flex items-center justify-between px-4 py-5 border-b border-gray-200">
               <p className="font-semibold text-gray-900">{clubName}</p>
               <button
@@ -105,6 +106,9 @@ export default function AppShell({
               </button>
             </div>
             <NavLinks clubId={clubId} onNavigate={() => setMenuOpen(false)} />
+            <div className="mt-auto p-2 border-t border-gray-100">
+              <DeleteClubButton clubId={clubId} clubName={clubName} />
+            </div>
           </div>
         </div>
       )}
@@ -118,7 +122,8 @@ export default function AppShell({
           <p className="font-semibold text-gray-900">{clubName}</p>
         </div>
         <NavLinks clubId={clubId} />
-        <div className="mt-auto p-2 border-t border-gray-100">
+        <div className="mt-auto p-2 border-t border-gray-100 space-y-1">
+          <DeleteClubButton clubId={clubId} clubName={clubName} />
           <form action={logout}>
             <button
               type="submit"

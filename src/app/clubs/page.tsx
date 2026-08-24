@@ -8,10 +8,10 @@ export const dynamic = "force-dynamic";
 export default async function ClubsSearchPage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string }>;
+  searchParams: Promise<{ q?: string; error?: string; name?: string }>;
 }) {
   const user = await requireUser();
-  const { q } = await searchParams;
+  const { q, error, name: duplicateName } = await searchParams;
   const query = q?.trim() ?? "";
 
   const [clubs, myMemberships] = await Promise.all([
@@ -32,6 +32,13 @@ export default async function ClubsSearchPage({
           ← 내 모임
         </Link>
         <h1 className="text-xl font-bold mt-2 mb-4">모임 찾기</h1>
+
+        {error === "duplicate" && (
+          <div className="rounded-md bg-red-50 text-red-600 text-sm px-3 py-2 mb-4">
+            &quot;{duplicateName}&quot; 이름의 모임이 이미 있습니다. 아래
+            목록에서 가입하거나 다른 이름을 사용해주세요.
+          </div>
+        )}
 
         <form className="flex gap-2 mb-6">
           <input

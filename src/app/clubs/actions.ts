@@ -12,6 +12,11 @@ export async function createClub(formData: FormData) {
 
   if (!name) return;
 
+  const existingClub = await prisma.club.findUnique({ where: { name } });
+  if (existingClub) {
+    redirect(`/clubs?error=duplicate&name=${encodeURIComponent(name)}`);
+  }
+
   const club = await prisma.club.create({
     data: {
       name,
