@@ -2,23 +2,34 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { ReactNode } from "react";
+import { logout } from "@/app/login/actions";
 
-const TABS = [
-  { href: "/", label: "동호회 소개" },
-  { href: "/members", label: "회원 목록" },
-  { href: "/dues", label: "회비 납부현황" },
-  { href: "/board", label: "게시판" },
-  { href: "/schedule", label: "일정" },
-];
+function getTabs(clubId: string) {
+  const base = `/clubs/${clubId}`;
+  return [
+    { href: base, label: "동호회 소개" },
+    { href: `${base}/members`, label: "회원 목록" },
+    { href: `${base}/dues`, label: "회비 납부현황" },
+    { href: `${base}/board`, label: "게시판" },
+    { href: `${base}/schedule`, label: "일정" },
+  ];
+}
 
-function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
+function NavLinks({
+  clubId,
+  onNavigate,
+}: {
+  clubId: string;
+  onNavigate?: () => void;
+}) {
   const pathname = usePathname();
+  const tabs = getTabs(clubId);
 
   return (
     <nav className="flex flex-col p-2 gap-1">
-      {TABS.map((tab) => {
+      {tabs.map((tab) => {
         const active = pathname === tab.href;
         return (
           <Link
@@ -39,21 +50,26 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-export default function AppShell({ children }: { children: ReactNode }) {
-  const pathname = usePathname();
+export default function AppShell({
+  clubId,
+  clubName,
+  children,
+}: {
+  clubId: string;
+  clubName: string;
+  children: ReactNode;
+}) {
   const [menuOpen, setMenuOpen] = useState(false);
-
-  useEffect(() => {
-    setMenuOpen(false);
-  }, [pathname]);
 
   return (
     <div className="min-h-screen w-full bg-slate-200 md:flex">
       {/* 모바일 상단 바 */}
       <header className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-3 md:hidden">
         <div>
-          <p className="text-xs text-gray-400">모임 이름 (가칭)</p>
-          <p className="font-semibold text-gray-900">우리 동호회</p>
+          <Link href="/" className="text-xs text-gray-400 hover:underline">
+            ← 내 모임
+          </Link>
+          <p className="font-semibold text-gray-900">{clubName}</p>
         </div>
         <button
           type="button"
@@ -78,7 +94,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
           />
           <div className="absolute left-0 top-0 h-full w-64 bg-white shadow-lg">
             <div className="flex items-center justify-between px-4 py-5 border-b border-gray-200">
-              <p className="font-semibold text-gray-900">우리 동호회</p>
+              <p className="font-semibold text-gray-900">{clubName}</p>
               <button
                 type="button"
                 onClick={() => setMenuOpen(false)}
@@ -88,18 +104,30 @@ export default function AppShell({ children }: { children: ReactNode }) {
                 ✕
               </button>
             </div>
-            <NavLinks onNavigate={() => setMenuOpen(false)} />
+            <NavLinks clubId={clubId} onNavigate={() => setMenuOpen(false)} />
           </div>
         </div>
       )}
 
       {/* 데스크톱 사이드바 */}
-      <aside className="hidden w-56 shrink-0 border-r border-gray-200 bg-white md:block">
+      <aside className="hidden w-56 shrink-0 border-r border-gray-200 bg-white md:flex md:flex-col">
         <div className="px-4 py-5 border-b border-gray-200">
-          <p className="text-sm text-gray-400">모임 이름 (가칭)</p>
-          <p className="font-semibold text-gray-900">우리 동호회</p>
+          <Link href="/" className="text-sm text-gray-400 hover:underline">
+            ← 내 모임
+          </Link>
+          <p className="font-semibold text-gray-900">{clubName}</p>
         </div>
-        <NavLinks />
+        <NavLinks clubId={clubId} />
+        <div className="mt-auto p-2 border-t border-gray-100">
+          <form action={logout}>
+            <button
+              type="submit"
+              className="w-full text-left rounded-md px-3 py-2 text-xs text-gray-400 hover:bg-gray-100"
+            >
+              로그아웃
+            </button>
+          </form>
+        </div>
       </aside>
 
       <main className="flex-1 p-4 md:p-8">{children}</main>

@@ -5,8 +5,14 @@ import { deleteBoard } from "./actions";
 
 export const dynamic = "force-dynamic";
 
-export default async function BoardPage() {
+export default async function BoardPage({
+  params,
+}: {
+  params: Promise<{ clubId: string }>;
+}) {
+  const { clubId } = await params;
   const boards = await prisma.board.findMany({
+    where: { clubId },
     orderBy: { createdAt: "asc" },
     include: { _count: { select: { posts: true } } },
   });
@@ -22,7 +28,7 @@ export default async function BoardPage() {
       </p>
 
       <div className="mb-4">
-        <CreateBoardForm />
+        <CreateBoardForm clubId={clubId} />
       </div>
 
       <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
@@ -36,7 +42,7 @@ export default async function BoardPage() {
             key={board.id}
             className="flex items-center justify-between px-4 py-3 gap-3"
           >
-            <Link href={`/board/${board.id}`} className="min-w-0 flex-1">
+            <Link href={`/clubs/${clubId}/board/${board.id}`} className="min-w-0 flex-1">
               <p className="font-medium text-sm truncate">{board.name}</p>
               <p className="text-xs text-gray-400">
                 게시글 {board._count.posts}개
@@ -50,6 +56,7 @@ export default async function BoardPage() {
               </span>
               <form action={deleteBoard}>
                 <input type="hidden" name="id" value={board.id} />
+                <input type="hidden" name="clubId" value={clubId} />
                 <button
                   type="submit"
                   className="text-xs text-gray-400 hover:text-red-600"

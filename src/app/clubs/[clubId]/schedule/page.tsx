@@ -15,8 +15,14 @@ function formatDate(date: Date) {
   }).format(date);
 }
 
-export default async function SchedulePage() {
+export default async function SchedulePage({
+  params,
+}: {
+  params: Promise<{ clubId: string }>;
+}) {
+  const { clubId } = await params;
   const events = await prisma.event.findMany({
+    where: { clubId },
     orderBy: { date: "asc" },
   });
 
@@ -30,7 +36,7 @@ export default async function SchedulePage() {
       </p>
 
       <div className="mb-4">
-        <CreateEventForm />
+        <CreateEventForm clubId={clubId} />
       </div>
 
       <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
@@ -53,13 +59,14 @@ export default async function SchedulePage() {
             </div>
             <div className="flex items-center gap-3 shrink-0">
               <Link
-                href={`/schedule/${event.id}`}
+                href={`/clubs/${clubId}/schedule/${event.id}`}
                 className="text-sm text-gray-500 underline underline-offset-2 hover:text-gray-900 whitespace-nowrap"
               >
                 참석 관리
               </Link>
               <form action={deleteEvent}>
                 <input type="hidden" name="id" value={event.id} />
+                <input type="hidden" name="clubId" value={clubId} />
                 <button
                   type="submit"
                   className="text-xs text-gray-400 hover:text-red-600"

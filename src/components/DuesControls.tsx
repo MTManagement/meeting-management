@@ -5,16 +5,18 @@ import type { PeriodType } from "@/lib/duesPeriods";
 import { PERIOD_TYPE_LABELS } from "@/lib/duesPeriods";
 
 export default function DuesControls({
+  clubId,
   year,
   periodType,
 }: {
+  clubId: string;
   year: number;
   periodType: PeriodType;
 }) {
   const router = useRouter();
 
   const goTo = (nextYear: number, nextUnit: PeriodType) => {
-    router.push(`/dues?year=${nextYear}&unit=${nextUnit}`);
+    router.push(`/clubs/${clubId}/dues?year=${nextYear}&unit=${nextUnit}`);
   };
 
   return (

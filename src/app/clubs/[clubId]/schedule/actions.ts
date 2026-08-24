@@ -4,9 +4,10 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 
 export async function createEvent(formData: FormData) {
+  const clubId = formData.get("clubId") as string;
   const title = (formData.get("title") as string)?.trim();
   const dateStr = formData.get("date") as string;
-  if (!title || !dateStr) return;
+  if (!clubId || !title || !dateStr) return;
 
   const location = (formData.get("location") as string)?.trim() || null;
   const address = (formData.get("address") as string)?.trim() || null;
@@ -17,6 +18,7 @@ export async function createEvent(formData: FormData) {
 
   await prisma.event.create({
     data: {
+      clubId,
       title,
       date: new Date(dateStr),
       location,
@@ -27,20 +29,22 @@ export async function createEvent(formData: FormData) {
     },
   });
 
-  revalidatePath("/schedule");
+  revalidatePath(`/clubs/${clubId}/schedule`);
 }
 
 export async function deleteEvent(formData: FormData) {
   const id = formData.get("id") as string;
+  const clubId = formData.get("clubId") as string;
   if (!id) return;
 
   await prisma.event.delete({ where: { id } });
 
-  revalidatePath("/schedule");
+  revalidatePath(`/clubs/${clubId}/schedule`);
 }
 
 export async function saveAttendance(formData: FormData) {
   const eventId = formData.get("eventId") as string;
+  const clubId = formData.get("clubId") as string;
   if (!eventId) return;
 
   const memberIds = formData.getAll("memberId") as string[];
@@ -56,5 +60,5 @@ export async function saveAttendance(formData: FormData) {
     })
   );
 
-  revalidatePath(`/schedule/${eventId}`);
+  revalidatePath(`/clubs/${clubId}/schedule/${eventId}`);
 }

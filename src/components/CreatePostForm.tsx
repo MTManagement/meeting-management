@@ -1,12 +1,14 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { createPost } from "@/app/board/actions";
+import { createPost } from "@/app/clubs/[clubId]/board/actions";
 
 export default function CreatePostForm({
+  clubId,
   boardId,
   anonymous,
 }: {
+  clubId: string;
   boardId: string;
   anonymous: boolean;
 }) {
@@ -32,6 +34,7 @@ export default function CreatePostForm({
           }}
           className="mt-3 rounded-lg border border-gray-200 bg-white p-4 space-y-2"
         >
+          <input type="hidden" name="clubId" value={clubId} />
           <input type="hidden" name="boardId" value={boardId} />
           <input
             type="hidden"

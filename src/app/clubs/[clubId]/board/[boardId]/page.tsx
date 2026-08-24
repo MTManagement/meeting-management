@@ -17,12 +17,12 @@ function formatDate(date: Date) {
 export default async function BoardDetailPage({
   params,
 }: {
-  params: Promise<{ boardId: string }>;
+  params: Promise<{ clubId: string; boardId: string }>;
 }) {
-  const { boardId } = await params;
+  const { clubId, boardId } = await params;
 
   const board = await prisma.board.findUnique({ where: { id: boardId } });
-  if (!board) notFound();
+  if (!board || board.clubId !== clubId) notFound();
 
   const posts = await prisma.post.findMany({
     where: { boardId },
@@ -33,7 +33,7 @@ export default async function BoardDetailPage({
   return (
     <div>
       <Link
-        href="/board"
+        href={`/clubs/${clubId}/board`}
         className="text-sm text-gray-500 hover:text-gray-900 mb-3 inline-block"
       >
         ← 게시판 목록
@@ -51,7 +51,11 @@ export default async function BoardDetailPage({
       </p>
 
       <div className="mb-4">
-        <CreatePostForm boardId={board.id} anonymous={board.anonymous} />
+        <CreatePostForm
+          clubId={clubId}
+          boardId={board.id}
+          anonymous={board.anonymous}
+        />
       </div>
 
       <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
@@ -65,7 +69,7 @@ export default async function BoardDetailPage({
             key={post.id}
             className="flex items-center justify-between px-4 py-3 gap-3"
           >
-            <Link href={`/board/${board.id}/${post.id}`} className="min-w-0 flex-1">
+            <Link href={`/clubs/${clubId}/board/${board.id}/${post.id}`} className="min-w-0 flex-1">
               <p className="font-medium text-sm truncate">
                 {post.title}
                 {post._count.comments > 0 && (
@@ -82,6 +86,7 @@ export default async function BoardDetailPage({
             <form action={deletePost}>
               <input type="hidden" name="id" value={post.id} />
               <input type="hidden" name="boardId" value={board.id} />
+              <input type="hidden" name="clubId" value={clubId} />
               <button
                 type="submit"
                 className="text-xs text-gray-400 hover:text-red-600 shrink-0"

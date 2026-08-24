@@ -20,15 +20,15 @@ const STATUS_OPTIONS = ["참석", "불참", "미정"] as const;
 export default async function EventDetailPage({
   params,
 }: {
-  params: Promise<{ id: string }>;
+  params: Promise<{ clubId: string; id: string }>;
 }) {
-  const { id } = await params;
+  const { clubId, id } = await params;
 
   const event = await prisma.event.findUnique({ where: { id } });
-  if (!event) notFound();
+  if (!event || event.clubId !== clubId) notFound();
 
   const [members, attendances] = await Promise.all([
-    prisma.member.findMany({ orderBy: { createdAt: "asc" } }),
+    prisma.member.findMany({ where: { clubId }, orderBy: { createdAt: "asc" } }),
     prisma.attendance.findMany({ where: { eventId: id } }),
   ]);
 
@@ -46,7 +46,7 @@ export default async function EventDetailPage({
   return (
     <div>
       <Link
-        href="/schedule"
+        href={`/clubs/${clubId}/schedule`}
         className="text-sm text-gray-500 hover:text-gray-900 mb-3 inline-block"
       >
         ← 일정 목록
@@ -69,6 +69,7 @@ export default async function EventDetailPage({
       <h2 className="font-semibold mb-2">참석 여부</h2>
       <form action={saveAttendance}>
         <input type="hidden" name="eventId" value={event.id} />
+        <input type="hidden" name="clubId" value={clubId} />
 
         <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
           <table className="w-full text-sm">

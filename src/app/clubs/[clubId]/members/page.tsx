@@ -5,8 +5,14 @@ import { deleteMember } from "./actions";
 
 export const dynamic = "force-dynamic";
 
-export default async function MembersPage() {
+export default async function MembersPage({
+  params,
+}: {
+  params: Promise<{ clubId: string }>;
+}) {
+  const { clubId } = await params;
   const members = await prisma.member.findMany({
+    where: { clubId },
     orderBy: { createdAt: "asc" },
   });
 
@@ -15,7 +21,7 @@ export default async function MembersPage() {
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">회원 목록</h1>
         <Link
-          href="/dues"
+          href={`/clubs/${clubId}/dues`}
           className="text-sm text-gray-500 underline underline-offset-2 hover:text-gray-900"
         >
           회비 납부현황 관리 →
@@ -28,7 +34,7 @@ export default async function MembersPage() {
       </p>
 
       <div className="mb-4">
-        <AddMemberForm />
+        <AddMemberForm clubId={clubId} />
       </div>
 
       <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
@@ -57,6 +63,7 @@ export default async function MembersPage() {
                 <td className="px-4 py-3 text-right">
                   <form action={deleteMember}>
                     <input type="hidden" name="id" value={m.id} />
+                    <input type="hidden" name="clubId" value={clubId} />
                     <button
                       type="submit"
                       className="text-xs text-gray-400 hover:text-red-600"

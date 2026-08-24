@@ -1,9 +1,9 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { createBoard } from "@/app/board/actions";
+import { createBoard } from "@/app/clubs/[clubId]/board/actions";
 
-export default function CreateBoardForm() {
+export default function CreateBoardForm({ clubId }: { clubId: string }) {
   const [open, setOpen] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -26,6 +26,7 @@ export default function CreateBoardForm() {
           }}
           className="mt-3 rounded-lg border border-gray-200 bg-white p-4 space-y-3"
         >
+          <input type="hidden" name="clubId" value={clubId} />
           <input
             name="name"
             placeholder="게시판 이름 (예: 공지사항)"

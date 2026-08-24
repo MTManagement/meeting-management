@@ -10,8 +10,33 @@ datasource db {
   provider = "postgresql"
 }
 
+// 로그인 계정 (현재는 게스트/닉네임 로그인, 추후 카카오·구글 연동 예정)
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  members   Member[]
+}
+
+// 동호회(모임)
+model Club {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  members     Member[]
+  events      Event[]
+  boards      Board[]
+}
+
+// 특정 모임에 속한 회원(가입 정보). userId가 있으면 실제 로그인 계정과 연결된 것,
+// 없으면 총무가 계정 없이 수동으로 등록해둔 회원.
 model Member {
   id           String        @id @default(cuid())
+  clubId       String
+  club         Club          @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  userId       String?
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
   name         String
   role         String
   phone        String
@@ -37,6 +62,8 @@ model DuesPayment {
 
 model Event {
   id           String       @id @default(cuid())
+  clubId       String
+  club         Club         @relation(fields: [clubId], references: [id], onDelete: Cascade)
   title        String
   date         DateTime
   location     String?
@@ -64,6 +91,8 @@ model Attendance {
 // type: "공지" | "자유"
 model Board {
   id              String   @id @default(cuid())
+  clubId          String
+  club            Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
   name            String
   type            String
   allowMemberPost Boolean  @default(true)

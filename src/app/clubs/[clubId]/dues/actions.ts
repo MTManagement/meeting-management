@@ -5,10 +5,11 @@ import { prisma } from "@/lib/prisma";
 import { isPeriodType, getPeriodIndexes } from "@/lib/duesPeriods";
 
 export async function saveDues(formData: FormData) {
+  const clubId = formData.get("clubId") as string;
   const year = Number(formData.get("year"));
   const periodTypeRaw = formData.get("periodType") as string;
 
-  if (!year || !isPeriodType(periodTypeRaw)) return;
+  if (!clubId || !year || !isPeriodType(periodTypeRaw)) return;
   const periodType = periodTypeRaw;
 
   const memberIds = formData.getAll("memberId") as string[];
@@ -34,5 +35,5 @@ export async function saveDues(formData: FormData) {
     )
   );
 
-  revalidatePath("/dues");
+  revalidatePath(`/clubs/${clubId}/dues`);
 }

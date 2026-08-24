@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { createEvent } from "@/app/schedule/actions";
+import { createEvent } from "@/app/clubs/[clubId]/schedule/actions";
 
 const OPTIONAL_FIELDS = [
   { name: "location", label: "장소", type: "text", placeholder: "예: 강남역 스터디룸" },
@@ -11,7 +11,7 @@ const OPTIONAL_FIELDS = [
   { name: "description", label: "설명/메모", type: "textarea", placeholder: "안내 사항 등" },
 ] as const;
 
-export default function CreateEventForm() {
+export default function CreateEventForm({ clubId }: { clubId: string }) {
   const [open, setOpen] = useState(false);
   const [enabled, setEnabled] = useState<Record<string, boolean>>({});
   const formRef = useRef<HTMLFormElement>(null);
@@ -40,6 +40,7 @@ export default function CreateEventForm() {
           }}
           className="mt-3 rounded-lg border border-gray-200 bg-white p-4 space-y-3"
         >
+          <input type="hidden" name="clubId" value={clubId} />
           <div className="flex flex-wrap gap-2">
             <input
               name="title"

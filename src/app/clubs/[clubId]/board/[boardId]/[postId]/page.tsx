@@ -18,9 +18,9 @@ function formatDate(date: Date) {
 export default async function PostDetailPage({
   params,
 }: {
-  params: Promise<{ boardId: string; postId: string }>;
+  params: Promise<{ clubId: string; boardId: string; postId: string }>;
 }) {
-  const { boardId, postId } = await params;
+  const { clubId, boardId, postId } = await params;
 
   const [board, post] = await Promise.all([
     prisma.board.findUnique({ where: { id: boardId } }),
@@ -30,12 +30,13 @@ export default async function PostDetailPage({
     }),
   ]);
 
-  if (!board || !post || post.boardId !== boardId) notFound();
+  if (!board || board.clubId !== clubId || !post || post.boardId !== boardId)
+    notFound();
 
   return (
     <div>
       <Link
-        href={`/board/${boardId}`}
+        href={`/clubs/${clubId}/board/${boardId}`}
         className="text-sm text-gray-500 hover:text-gray-900 mb-3 inline-block"
       >
         ← {board.name}
@@ -72,6 +73,7 @@ export default async function PostDetailPage({
       </div>
 
       <CreateCommentForm
+        clubId={clubId}
         boardId={boardId}
         postId={postId}
         anonymous={board.anonymous}

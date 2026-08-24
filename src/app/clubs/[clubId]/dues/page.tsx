@@ -12,19 +12,24 @@ import {
 export const dynamic = "force-dynamic";
 
 export default async function DuesPage({
+  params,
   searchParams,
 }: {
+  params: Promise<{ clubId: string }>;
   searchParams: Promise<{ year?: string; unit?: string }>;
 }) {
-  const params = await searchParams;
-  const year = Number(params.year) || new Date().getFullYear();
-  const periodType: PeriodType = isPeriodType(params.unit ?? "")
-    ? (params.unit as PeriodType)
+  const { clubId } = await params;
+  const sp = await searchParams;
+  const year = Number(sp.year) || new Date().getFullYear();
+  const periodType: PeriodType = isPeriodType(sp.unit ?? "")
+    ? (sp.unit as PeriodType)
     : "MONTH";
 
   const [members, payments] = await Promise.all([
-    prisma.member.findMany({ orderBy: { createdAt: "asc" } }),
-    prisma.duesPayment.findMany({ where: { year, periodType } }),
+    prisma.member.findMany({ where: { clubId }, orderBy: { createdAt: "asc" } }),
+    prisma.duesPayment.findMany({
+      where: { year, periodType, member: { clubId } },
+    }),
   ]);
 
   const paidMap = new Map<string, boolean>();
@@ -40,13 +45,14 @@ export default async function DuesPage({
         <h1 className="text-2xl font-bold">회비 납부현황</h1>
       </div>
       <p className="text-gray-600 mb-4 text-sm">
-        총무·회장 전용 관리 화면입니다. (접근 권한 제한은 로그인 기능 도입 후
-        적용 예정)
+        총무·회장 전용 관리 화면입니다. (역할별 접근 제한은 아직 미적용 — 이
+        모임에 가입한 회원이면 누구나 볼 수 있습니다)
       </p>
 
-      <DuesControls year={year} periodType={periodType} />
+      <DuesControls clubId={clubId} year={year} periodType={periodType} />
 
       <form action={saveDues}>
+        <input type="hidden" name="clubId" value={clubId} />
         <input type="hidden" name="year" value={year} />
         <input type="hidden" name="periodType" value={periodType} />
 

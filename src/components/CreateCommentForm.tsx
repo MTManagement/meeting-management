@@ -1,13 +1,15 @@
 "use client";
 
 import { useRef } from "react";
-import { createComment } from "@/app/board/actions";
+import { createComment } from "@/app/clubs/[clubId]/board/actions";
 
 export default function CreateCommentForm({
+  clubId,
   boardId,
   postId,
   anonymous,
 }: {
+  clubId: string;
   boardId: string;
   postId: string;
   anonymous: boolean;
@@ -23,6 +25,7 @@ export default function CreateCommentForm({
       }}
       className="flex flex-wrap gap-2 items-start"
     >
+      <input type="hidden" name="clubId" value={clubId} />
       <input type="hidden" name="boardId" value={boardId} />
       <input type="hidden" name="postId" value={postId} />
       <input

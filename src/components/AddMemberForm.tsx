@@ -1,9 +1,9 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { addMember } from "@/app/members/actions";
+import { addMember } from "@/app/clubs/[clubId]/members/actions";
 
-export default function AddMemberForm() {
+export default function AddMemberForm({ clubId }: { clubId: string }) {
   const [open, setOpen] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -26,6 +26,7 @@ export default function AddMemberForm() {
           }}
           className="mt-3 rounded-lg border border-gray-200 bg-white p-4 flex flex-wrap gap-2"
         >
+          <input type="hidden" name="clubId" value={clubId} />
           <input
             name="name"
             placeholder="이름"
