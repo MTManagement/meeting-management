@@ -4,6 +4,7 @@ FROM node:20-alpine AS base
 FROM base AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY prisma ./prisma
 RUN npm ci
 
 # ---- builder: Prisma generate + DB push + Next.js build ----
