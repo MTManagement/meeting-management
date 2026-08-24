@@ -1,0 +1,15 @@
+services:
+  mtmanagement-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        DATABASE_URL: ${DATABASE_URL}
+    image: mtmanagement-server:latest
+    container_name: mtmanagement-server
+    restart: unless-stopped
+    ports:
+      - "3002:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
