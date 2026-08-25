@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
-import { isAdminGrade, isMainAdminGrade } from "@/lib/permissions";
+import { isAdminGrade, isMainAdminGrade, ensureMainAdmin } from "@/lib/permissions";
 import AppShell from "@/components/AppShell";
 
 export default async function ClubLayout({
@@ -17,6 +17,8 @@ export default async function ClubLayout({
 
   const club = await prisma.club.findUnique({ where: { id: clubId } });
   if (!club) notFound();
+
+  await ensureMainAdmin(clubId);
 
   const [membership, pendingRequest, boards] = await Promise.all([
     prisma.member.findFirst({ where: { clubId, userId: user.id } }),

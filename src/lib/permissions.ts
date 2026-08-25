@@ -41,3 +41,24 @@ export async function requireMainAdmin(clubId: string) {
 export async function getViewerMembership(clubId: string, userId: string) {
   return prisma.member.findFirst({ where: { clubId, userId } });
 }
+
+// 권한 등급(grade) 컬럼이 추가되기 전에 생성된 모임은 기존 회원 행이
+// 스키마 기본값("MEMBER")으로 백필되어 메인 관리자가 없는 상태가 될 수 있다.
+// 그런 모임을 발견하면 가장 먼저 가입한 회원(=생성자)을 메인 관리자로 승격한다.
+export async function ensureMainAdmin(clubId: string) {
+  const existingMainAdmin = await prisma.member.findFirst({
+    where: { clubId, grade: "MAIN_ADMIN" },
+  });
+  if (existingMainAdmin) return;
+
+  const earliestMember = await prisma.member.findFirst({
+    where: { clubId },
+    orderBy: { createdAt: "asc" },
+  });
+  if (!earliestMember) return;
+
+  await prisma.member.update({
+    where: { id: earliestMember.id },
+    data: { grade: "MAIN_ADMIN" },
+  });
+}
