@@ -7,18 +7,20 @@ services:
     ports:
       - "3102:3102"
     environment:
-      - PORT=3102
+      # 전부 .env 값이 항상 우선하도록 ${VAR:-default} 형태로 통일.
+      # (예전에는 BRANCH 등 일부가 리터럴로 박혀 있어서 .env를 바꿔도 무시됐음)
+      - PORT=${PORT:-3102}
       - CONTROL_PASSWORD=${CONTROL_PASSWORD}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
-      - GITEA_HOST=git.snaphy.co.kr
+      - GITEA_HOST=${GITEA_HOST:-git.snaphy.co.kr}
       - GITEA_TOKEN=${GITEA_TOKEN}
       - GITEA_USERNAME=${GITEA_USERNAME}
       - GITEA_PASSWORD=${GITEA_PASSWORD}
-      - APP_CONTAINER=mtmanagement-server
-      - REPO_DIR=/volume1/docker/mtmanagement/repo
-      - SERVER_DIR=/volume1/docker/mtmanagement/server
-      - REPO_SLUG=MTManagement/meeting-management
-      - BRANCH=main
+      - APP_CONTAINER=${APP_CONTAINER:-mtmanagement-server}
+      - REPO_DIR=${REPO_DIR:-/volume1/docker/mtmanagement/repo}
+      - SERVER_DIR=${SERVER_DIR:-/volume1/docker/mtmanagement/server}
+      - REPO_SLUG=${REPO_SLUG:-MTManagement/meeting-management}
+      - BRANCH=${BRANCH:-main}
     volumes:
       # 호스트 도커 소켓 마운트 → 컨테이너 안에서 나스의 다른 컨테이너 제어
       - /var/run/docker.sock:/var/run/docker.sock

@@ -23,6 +23,22 @@ if (!WEBHOOK_SECRET) {
   console.warn("WEBHOOK_SECRET이 설정되지 않았습니다. 웹훅 배포가 항상 거부됩니다.");
 }
 
+// 부팅 시 실제로 컨테이너에 주입된 값을 로그로 남긴다.
+// (.env를 고쳐도 컨테이너를 재생성하지 않으면 반영되지 않는 문제를
+//  "docker logs mtmanagement-control"로 바로 확인할 수 있게 하기 위함)
+function mask(v) {
+  if (!v) return "(미설정)";
+  return v.length <= 4 ? "****" : `${v.slice(0, 4)}...(${v.length}자)`;
+}
+console.log(
+  `[boot] BRANCH=${DEPLOY_BRANCH} REPO_DIR=${process.env.REPO_DIR} SERVER_DIR=${process.env.SERVER_DIR}`
+);
+console.log(
+  `[boot] GITEA_TOKEN=${mask(process.env.GITEA_TOKEN)} GITEA_USERNAME=${
+    process.env.GITEA_USERNAME || "(미설정)"
+  }`
+);
+
 // ---- 인증: 비밀번호 로그인 -> 메모리 토큰 발급 ----
 const tokens = new Map(); // token -> expiresAt
 const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // 12시간

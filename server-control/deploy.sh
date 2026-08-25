@@ -20,7 +20,14 @@ fi
 
 log() { echo "[deploy $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
-log "배포 시작 (branch=$BRANCH)"
+log "배포 시작 (branch=$BRANCH, repo=$GITEA_HOST/$REPO_SLUG)"
+if [ -n "${GITEA_TOKEN:-}" ]; then
+  log "인증: GITEA_TOKEN 사용 (길이 ${#GITEA_TOKEN}자)"
+elif [ -n "${GITEA_USERNAME:-}" ] && [ -n "${GITEA_PASSWORD:-}" ]; then
+  log "인증: GITEA_USERNAME/GITEA_PASSWORD 사용 (user=$GITEA_USERNAME)"
+else
+  log "인증: 없음 (익명 접근 - private 저장소면 여기서 실패함)"
+fi
 
 if [ ! -d "$REPO_DIR/.git" ]; then
   log "저장소 최초 clone"
