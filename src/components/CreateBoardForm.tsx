@@ -44,6 +44,7 @@ export default function CreateBoardForm({ clubId }: { clubId: string }) {
               >
                 <option value="공지">공지 게시판</option>
                 <option value="자유">자유 게시판</option>
+                <option value="투표">투표 게시판</option>
               </select>
             </label>
 

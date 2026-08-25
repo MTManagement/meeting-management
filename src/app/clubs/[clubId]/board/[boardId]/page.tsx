@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { requireMembership } from "@/lib/auth";
 import CreatePostForm from "@/components/CreatePostForm";
+import CreatePollForm from "@/components/CreatePollForm";
 import { deletePost } from "../actions";
 
 export const dynamic = "force-dynamic";
@@ -53,11 +54,19 @@ export default async function BoardDetailPage({
       </p>
 
       <div className="mb-4">
-        <CreatePostForm
-          clubId={clubId}
-          boardId={board.id}
-          anonymous={board.anonymous}
-        />
+        {board.type === "투표" ? (
+          <CreatePollForm
+            clubId={clubId}
+            boardId={board.id}
+            anonymous={board.anonymous}
+          />
+        ) : (
+          <CreatePostForm
+            clubId={clubId}
+            boardId={board.id}
+            anonymous={board.anonymous}
+          />
+        )}
       </div>
 
       <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
@@ -73,6 +82,9 @@ export default async function BoardDetailPage({
           >
             <Link href={`/clubs/${clubId}/board/${board.id}/${post.id}`} className="min-w-0 flex-1">
               <p className="font-medium text-sm truncate">
+                {post.isPoll && (
+                  <span className="text-gray-400 font-normal mr-1">[투표]</span>
+                )}
                 {post.title}
                 {post._count.comments > 0 && (
                   <span className="text-gray-400 font-normal">

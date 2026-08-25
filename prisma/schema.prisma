@@ -55,6 +55,7 @@ model Member {
   transferRequestsSent     AdminTransferRequest[] @relation("TransferFrom")
   transferRequestsReceived AdminTransferRequest[] @relation("TransferTo")
   fieldValues              MemberFieldValue[]
+  pollVotes                PollVote[]
 }
 
 // 회원 목록의 관리자 정의 자유 컬럼 (완전 자유 폼빌더 대신 "컬럼명 추가 +
@@ -182,14 +183,17 @@ model Board {
 }
 
 model Post {
-  id         String    @id @default(cuid())
-  boardId    String
-  board      Board     @relation(fields: [boardId], references: [id], onDelete: Cascade)
-  title      String
-  content    String
-  authorName String
-  createdAt  DateTime  @default(now())
-  comments   Comment[]
+  id            String       @id @default(cuid())
+  boardId       String
+  board         Board        @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  title         String
+  content       String
+  authorName    String
+  isPoll        Boolean      @default(false)
+  allowMultiple Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+  comments      Comment[]
+  pollOptions   PollOption[]
 }
 
 model Comment {
@@ -199,4 +203,25 @@ model Comment {
   content    String
   authorName String
   createdAt  DateTime @default(now())
+}
+
+// 투표 게시물의 선택지. order는 표시 순서.
+model PollOption {
+  id     String     @id @default(cuid())
+  postId String
+  post   Post       @relation(fields: [postId], references: [id], onDelete: Cascade)
+  label  String
+  order  Int        @default(0)
+  votes  PollVote[]
+}
+
+model PollVote {
+  id        String     @id @default(cuid())
+  optionId  String
+  option    PollOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  memberId  String
+  member    Member     @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  createdAt DateTime   @default(now())
+
+  @@unique([optionId, memberId])
 }
