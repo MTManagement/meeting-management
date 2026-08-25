@@ -7,19 +7,15 @@ COPY package.json package-lock.json ./
 COPY prisma ./prisma
 RUN npm ci
 
-# ---- builder: Prisma generate + DB push + Next.js build ----
+# ---- builder: Prisma generate(코드 생성만, DB 접속 없음) + Next.js build ----
 FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# DB push는 빌드 시점에 실행되므로, 빌드 환경에서 DATABASE_URL로 DB에 접근 가능해야 함
-ARG DATABASE_URL
-ENV DATABASE_URL=${DATABASE_URL}
-
 RUN npm run build
 
-# ---- runner: standalone 산출물만 담아 실행 ----
+# ---- runner: standalone 산출물 + DB 동기화용 entrypoint ----
 FROM base AS runner
 WORKDIR /app
 ENV NODE_ENV=production
@@ -31,9 +27,20 @@ COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# standalone 산출물의 node_modules는 트레이싱된 최소 구성이라 prisma CLI가
+# 빠져 있음. entrypoint에서 "prisma db push"를 실행할 수 있도록 deps 단계의
+# 전체 node_modules(및 schema)를 덧씌운다 - 이미지 크기보다 안정성 우선.
+COPY --from=deps --chown=nextjs:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
+COPY --chown=nextjs:nodejs docker-entrypoint.sh ./docker-entrypoint.sh
+RUN chmod +x ./docker-entrypoint.sh
+
 USER nextjs
 EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
+# DATABASE_URL은 빌드 시점이 아니라 컨테이너 실행 시점에만 필요
+# (Neon 등 서버리스 DB가 슬립 상태여도 이미지 빌드는 항상 성공함)
+ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["node", "server.js"]
