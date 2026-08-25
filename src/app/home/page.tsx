@@ -23,14 +23,22 @@ export default async function HomePage() {
             <p className="text-sm text-gray-500">안녕하세요,</p>
             <p className="text-lg font-bold text-gray-900">{user.name}님</p>
           </div>
-          <form action={logout}>
-            <button
-              type="submit"
-              className="text-xs text-gray-400 hover:text-gray-700"
+          <div className="flex items-center gap-3">
+            <Link
+              href="/mypage"
+              className="text-xs text-gray-500 hover:text-gray-900"
             >
-              로그아웃
-            </button>
-          </form>
+              마이페이지
+            </Link>
+            <form action={logout}>
+              <button
+                type="submit"
+                className="text-xs text-gray-400 hover:text-gray-700"
+              >
+                로그아웃
+              </button>
+            </form>
+          </div>
         </div>
 
         <form action="/clubs" className="flex gap-2 mb-4">
