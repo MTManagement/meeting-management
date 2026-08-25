@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
-import { isAdminGrade } from "@/lib/permissions";
 import CreateEventForm from "@/components/CreateEventForm";
 import MembershipRequiredNotice from "@/components/MembershipRequiredNotice";
+import AccessDeniedNotice from "@/components/AccessDeniedNotice";
+import { getViewerMenuAccess } from "@/lib/menuPermissions";
 import { deleteEvent } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -25,9 +26,11 @@ export default async function SchedulePage({
 }) {
   const { clubId } = await params;
   const user = await requireUser();
-  const viewer = await prisma.member.findFirst({
-    where: { clubId, userId: user.id },
-  });
+  const { membership: viewer, access } = await getViewerMenuAccess(
+    clubId,
+    user.id,
+    "SCHEDULE"
+  );
   if (!viewer) {
     return (
       <div>
@@ -36,7 +39,15 @@ export default async function SchedulePage({
       </div>
     );
   }
-  const isAdmin = isAdminGrade(viewer.grade);
+  if (access === "NONE") {
+    return (
+      <div>
+        <h1 className="text-2xl font-bold mb-4">일정</h1>
+        <AccessDeniedNotice />
+      </div>
+    );
+  }
+  const canWrite = access === "READ_WRITE";
   const events = await prisma.event.findMany({
     where: { clubId },
     orderBy: { date: "asc" },
@@ -51,7 +62,7 @@ export default async function SchedulePage({
         일정을 등록하고, 각 일정별로 참석 여부를 관리할 수 있습니다.
       </p>
 
-      {isAdmin && (
+      {canWrite && (
         <div className="mb-4">
           <CreateEventForm clubId={clubId} />
         </div>
@@ -82,7 +93,7 @@ export default async function SchedulePage({
               >
                 참석 관리
               </Link>
-              {isAdmin && (
+              {canWrite && (
                 <form action={deleteEvent}>
                   <input type="hidden" name="id" value={event.id} />
                   <input type="hidden" name="clubId" value={clubId} />

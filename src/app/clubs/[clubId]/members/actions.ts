@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
-import { requireAdmin } from "@/lib/permissions";
+import { requireMenuWrite } from "@/lib/menuPermissions";
 
 export async function addMember(formData: FormData) {
   const clubId = formData.get("clubId") as string;
@@ -11,7 +11,7 @@ export async function addMember(formData: FormData) {
   const phone = (formData.get("phone") as string)?.trim();
 
   if (!clubId || !name) return;
-  await requireAdmin(clubId);
+  await requireMenuWrite(clubId, "MEMBERS");
 
   await prisma.member.create({
     data: { clubId, name, role, phone },
@@ -20,12 +20,12 @@ export async function addMember(formData: FormData) {
   revalidatePath(`/clubs/${clubId}/members`);
 }
 
-// 회원 강제 탈퇴 (관리자 전용). 메인 관리자는 이 경로로 제거할 수 없다.
+// 회원 강제 탈퇴 ("회원 목록" 메뉴 쓰기 권한 필요). 메인 관리자는 이 경로로 제거할 수 없다.
 export async function deleteMember(formData: FormData) {
   const id = formData.get("id") as string;
   const clubId = formData.get("clubId") as string;
   if (!id || !clubId) return;
-  await requireAdmin(clubId);
+  await requireMenuWrite(clubId, "MEMBERS");
 
   const target = await prisma.member.findUnique({ where: { id } });
   if (!target || target.clubId !== clubId) return;

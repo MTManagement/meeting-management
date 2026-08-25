@@ -2,6 +2,8 @@ import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
 import DuesControls from "@/components/DuesControls";
 import MembershipRequiredNotice from "@/components/MembershipRequiredNotice";
+import AccessDeniedNotice from "@/components/AccessDeniedNotice";
+import { getViewerMenuAccess } from "@/lib/menuPermissions";
 import { saveDues } from "./actions";
 import {
   isPeriodType,
@@ -22,9 +24,11 @@ export default async function DuesPage({
 }) {
   const { clubId } = await params;
   const user = await requireUser();
-  const viewer = await prisma.member.findFirst({
-    where: { clubId, userId: user.id },
-  });
+  const { membership: viewer, access } = await getViewerMenuAccess(
+    clubId,
+    user.id,
+    "DUES"
+  );
   if (!viewer) {
     return (
       <div>
@@ -33,6 +37,15 @@ export default async function DuesPage({
       </div>
     );
   }
+  if (access === "NONE") {
+    return (
+      <div>
+        <h1 className="text-2xl font-bold mb-4">회비 납부현황</h1>
+        <AccessDeniedNotice />
+      </div>
+    );
+  }
+  const canWrite = access === "READ_WRITE";
   const sp = await searchParams;
   const year = Number(sp.year) || new Date().getFullYear();
   const periodType: PeriodType = isPeriodType(sp.unit ?? "")
@@ -59,8 +72,9 @@ export default async function DuesPage({
         <h1 className="text-2xl font-bold">회비 납부현황</h1>
       </div>
       <p className="text-gray-600 mb-4 text-sm">
-        총무·회장 전용 관리 화면입니다. (역할별 접근 제한은 아직 미적용 — 이
-        모임에 가입한 회원이면 누구나 볼 수 있습니다)
+        {canWrite
+          ? "회비 납부현황을 체크하고 저장할 수 있습니다."
+          : "조회 전용입니다. 저장 권한은 관리자가 설정에서 부여할 수 있습니다."}
       </p>
 
       <DuesControls clubId={clubId} year={year} periodType={periodType} />
@@ -111,6 +125,7 @@ export default async function DuesPage({
                         type="checkbox"
                         name={`paid__${m.id}__${idx}`}
                         defaultChecked={paidMap.get(cellKey(m.id, idx)) ?? false}
+                        disabled={!canWrite}
                         className="h-4 w-4 accent-gray-900"
                       />
                     </td>
@@ -121,7 +136,7 @@ export default async function DuesPage({
           </table>
         </div>
 
-        {members.length > 0 && (
+        {members.length > 0 && canWrite && (
           <button
             type="submit"
             className="mt-4 rounded-md bg-gray-900 text-white text-sm px-4 py-2"

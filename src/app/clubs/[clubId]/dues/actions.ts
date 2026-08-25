@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { isPeriodType, getPeriodIndexes } from "@/lib/duesPeriods";
+import { requireMenuWrite } from "@/lib/menuPermissions";
 
 export async function saveDues(formData: FormData) {
   const clubId = formData.get("clubId") as string;
@@ -10,6 +11,7 @@ export async function saveDues(formData: FormData) {
   const periodTypeRaw = formData.get("periodType") as string;
 
   if (!clubId || !year || !isPeriodType(periodTypeRaw)) return;
+  await requireMenuWrite(clubId, "DUES");
   const periodType = periodTypeRaw;
 
   const memberIds = formData.getAll("memberId") as string[];

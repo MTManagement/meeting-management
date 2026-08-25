@@ -1,9 +1,11 @@
 import Link from "next/link";
-import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
 import AddMemberForm from "@/components/AddMemberForm";
 import MembershipRequiredNotice from "@/components/MembershipRequiredNotice";
-import { isAdminGrade, gradeLabel } from "@/lib/permissions";
+import AccessDeniedNotice from "@/components/AccessDeniedNotice";
+import { gradeLabel } from "@/lib/permissions";
+import { getViewerMenuAccess } from "@/lib/menuPermissions";
+import { prisma } from "@/lib/prisma";
 import { deleteMember } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -15,9 +17,12 @@ export default async function MembersPage({
 }) {
   const { clubId } = await params;
   const user = await requireUser();
-  const viewer = await prisma.member.findFirst({
-    where: { clubId, userId: user.id },
-  });
+  const { membership: viewer, access } = await getViewerMenuAccess(
+    clubId,
+    user.id,
+    "MEMBERS"
+  );
+
   if (!viewer) {
     return (
       <div>
@@ -26,7 +31,17 @@ export default async function MembersPage({
       </div>
     );
   }
-  const isAdmin = isAdminGrade(viewer.grade);
+
+  if (access === "NONE") {
+    return (
+      <div>
+        <h1 className="text-2xl font-bold mb-4">회원 목록</h1>
+        <AccessDeniedNotice />
+      </div>
+    );
+  }
+
+  const canWrite = access === "READ_WRITE";
   const members = await prisma.member.findMany({
     where: { clubId },
     orderBy: { createdAt: "asc" },
@@ -49,7 +64,7 @@ export default async function MembersPage({
         확인할 수 있습니다.
       </p>
 
-      {isAdmin && (
+      {canWrite && (
         <div className="mb-4">
           <AddMemberForm clubId={clubId} />
         </div>
@@ -81,7 +96,7 @@ export default async function MembersPage({
                 <td className="px-4 py-3 text-gray-500">{m.role || "-"}</td>
                 <td className="px-4 py-3">{m.phone}</td>
                 <td className="px-4 py-3 text-right">
-                  {isAdmin && m.grade !== "MAIN_ADMIN" && (
+                  {canWrite && m.grade !== "MAIN_ADMIN" && (
                     <form action={deleteMember}>
                       <input type="hidden" name="id" value={m.id} />
                       <input type="hidden" name="clubId" value={clubId} />

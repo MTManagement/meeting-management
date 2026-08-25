@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin, requireMainAdmin } from "@/lib/permissions";
+import { MENU_TYPES, type MenuType } from "@/lib/menuPermissions";
 
 export async function approveMembershipRequest(formData: FormData) {
   const clubId = formData.get("clubId") as string;
@@ -98,6 +99,53 @@ export async function updateMemberRole(formData: FormData) {
   revalidatePath(`/clubs/${clubId}/settings`);
   revalidatePath(`/clubs/${clubId}/members`);
   revalidatePath("/home");
+}
+
+const CONFIGURABLE_GRADES = ["ADMIN", "MEMBER"] as const;
+const VALID_ACCESS = new Set(["READ_WRITE", "READ_ONLY", "NONE"]);
+
+// 등급(관리자권한자/일반 회원) x 메뉴(회원목록/회비/게시판/일정) 접근권한 매트릭스 저장.
+export async function updateMenuPermissions(formData: FormData) {
+  const clubId = formData.get("clubId") as string;
+  if (!clubId) return;
+  await requireAdmin(clubId);
+
+  const rows: { grade: string; menuType: MenuType; access: string }[] = [];
+  for (const grade of CONFIGURABLE_GRADES) {
+    for (const menuType of MENU_TYPES) {
+      const access = formData.get(`access__${grade}__${menuType}`) as string;
+      if (VALID_ACCESS.has(access)) {
+        rows.push({ grade, menuType, access });
+      }
+    }
+  }
+
+  await prisma.$transaction(
+    rows.map((r) =>
+      prisma.menuPermission.upsert({
+        where: {
+          clubId_grade_menuType: {
+            clubId,
+            grade: r.grade,
+            menuType: r.menuType,
+          },
+        },
+        update: { access: r.access },
+        create: {
+          clubId,
+          grade: r.grade,
+          menuType: r.menuType,
+          access: r.access,
+        },
+      })
+    )
+  );
+
+  revalidatePath(`/clubs/${clubId}/settings`);
+  revalidatePath(`/clubs/${clubId}/members`);
+  revalidatePath(`/clubs/${clubId}/dues`);
+  revalidatePath(`/clubs/${clubId}/board`);
+  revalidatePath(`/clubs/${clubId}/schedule`);
 }
 
 export async function updateClubInfo(formData: FormData) {

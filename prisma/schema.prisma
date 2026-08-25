@@ -21,14 +21,16 @@ model User {
 
 // 모임
 model Club {
-  id                 String              @id @default(cuid())
-  name               String              @unique
-  description        String?
-  createdAt          DateTime            @default(now())
-  members            Member[]
-  events             Event[]
-  boards             Board[]
-  membershipRequests MembershipRequest[]
+  id                    String                 @id @default(cuid())
+  name                  String                 @unique
+  description           String?
+  createdAt             DateTime               @default(now())
+  members               Member[]
+  events                Event[]
+  boards                Board[]
+  membershipRequests    MembershipRequest[]
+  menuPermissions       MenuPermission[]
+  adminTransferRequests AdminTransferRequest[]
 }
 
 // 특정 모임에 속한 회원(가입 정보). userId가 있으면 실제 로그인 계정과 연결된 것,
@@ -48,6 +50,40 @@ model Member {
   createdAt    DateTime      @default(now())
   duesPayments DuesPayment[]
   attendances  Attendance[]
+
+  transferRequestsSent     AdminTransferRequest[] @relation("TransferFrom")
+  transferRequestsReceived AdminTransferRequest[] @relation("TransferTo")
+}
+
+// 등급별 메뉴 접근 권한. MAIN_ADMIN은 항상 전체 허용이라 저장하지 않는다.
+// grade: "ADMIN" | "MEMBER"
+// menuType: "MEMBERS" | "DUES" | "BOARD" | "SCHEDULE"
+// access: "READ_WRITE" | "READ_ONLY" | "NONE"
+model MenuPermission {
+  id       String @id @default(cuid())
+  clubId   String
+  club     Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  grade    String
+  menuType String
+  access   String @default("READ_WRITE")
+
+  @@unique([clubId, grade, menuType])
+}
+
+// 메인 관리자 위임 요청 (요청 -> 수락/거절/취소). 수락 즉시 등급이 교체되며,
+// 이 테이블 자체가 위임 이력(누가 언제 누구에게 위임했는지) 기록이다.
+// status: "PENDING" | "ACCEPTED" | "REJECTED" | "CANCELED"
+model AdminTransferRequest {
+  id           String    @id @default(cuid())
+  clubId       String
+  club         Club      @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  fromMemberId String
+  fromMember   Member    @relation("TransferFrom", fields: [fromMemberId], references: [id], onDelete: Cascade)
+  toMemberId   String
+  toMember     Member    @relation("TransferTo", fields: [toMemberId], references: [id], onDelete: Cascade)
+  status       String    @default("PENDING")
+  createdAt    DateTime  @default(now())
+  respondedAt  DateTime?
 }
 
 // 모임 가입 신청 (승인제). status: "PENDING" | "APPROVED" | "REJECTED"

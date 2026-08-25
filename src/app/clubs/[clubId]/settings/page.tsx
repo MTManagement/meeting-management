@@ -1,12 +1,23 @@
 import { prisma } from "@/lib/prisma";
 import { requireAdmin, isMainAdminGrade, gradeLabel } from "@/lib/permissions";
 import {
+  MENU_TYPES,
+  MENU_TYPE_LABEL,
+  ACCESS_LABEL,
+  getMenuAccess,
+  type Access,
+} from "@/lib/menuPermissions";
+import {
   approveMembershipRequest,
   rejectMembershipRequest,
   setMemberGrade,
   updateClubInfo,
   updateMemberRole,
+  updateMenuPermissions,
 } from "./actions";
+
+const CONFIGURABLE_GRADES = ["ADMIN", "MEMBER"] as const;
+const ACCESS_OPTIONS: Access[] = ["READ_WRITE", "READ_ONLY", "NONE"];
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +45,18 @@ export default async function SettingsPage({
       orderBy: { createdAt: "asc" },
     }),
   ]);
+
+  const accessMatrix: Record<string, Record<string, Access>> = {};
+  for (const grade of CONFIGURABLE_GRADES) {
+    accessMatrix[grade] = {};
+    for (const menuType of MENU_TYPES) {
+      accessMatrix[grade][menuType] = await getMenuAccess(
+        clubId,
+        grade,
+        menuType
+      );
+    }
+  }
 
   return (
     <div className="max-w-2xl space-y-8">
@@ -142,6 +165,65 @@ export default async function SettingsPage({
             </div>
           ))}
         </div>
+      </section>
+
+      {/* 메뉴별 접근 권한 */}
+      <section>
+        <h2 className="font-semibold mb-3">메뉴별 접근 권한</h2>
+        <p className="text-xs text-gray-400 mb-3">
+          등급별로 메뉴마다 읽기/쓰기, 읽기만, 접근불가를 설정할 수 있습니다.
+          메인 관리자는 항상 모든 메뉴에 읽기/쓰기 권한을 갖습니다.
+        </p>
+        <form
+          action={updateMenuPermissions}
+          className="rounded-lg border border-gray-200 bg-white p-4"
+        >
+          <input type="hidden" name="clubId" value={clubId} />
+          <div className="overflow-x-auto">
+            <table className="text-sm w-full">
+              <thead>
+                <tr className="border-b border-gray-200 text-left">
+                  <th className="py-2 pr-4 font-medium">등급</th>
+                  {MENU_TYPES.map((menuType) => (
+                    <th key={menuType} className="py-2 px-2 font-medium whitespace-nowrap">
+                      {MENU_TYPE_LABEL[menuType]}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {CONFIGURABLE_GRADES.map((grade) => (
+                  <tr key={grade} className="border-b border-gray-100 last:border-0">
+                    <td className="py-2 pr-4 font-medium whitespace-nowrap">
+                      {gradeLabel(grade)}
+                    </td>
+                    {MENU_TYPES.map((menuType) => (
+                      <td key={menuType} className="py-2 px-2">
+                        <select
+                          name={`access__${grade}__${menuType}`}
+                          defaultValue={accessMatrix[grade][menuType]}
+                          className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+                        >
+                          {ACCESS_OPTIONS.map((option) => (
+                            <option key={option} value={option}>
+                              {ACCESS_LABEL[option]}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <button
+            type="submit"
+            className="mt-4 rounded-md bg-gray-900 text-white text-sm px-4 py-2"
+          >
+            저장
+          </button>
+        </form>
       </section>
 
       {/* 모임 기본 정보 수정 */}

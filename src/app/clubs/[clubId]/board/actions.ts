@@ -3,7 +3,8 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
-import { requireAdmin, isAdminGrade } from "@/lib/permissions";
+import { isAdminGrade } from "@/lib/permissions";
+import { requireMenuWrite } from "@/lib/menuPermissions";
 
 async function requirePostAccess(clubId: string, boardId: string) {
   const user = await requireUser();
@@ -24,7 +25,7 @@ export async function createBoard(formData: FormData) {
   const anonymous = formData.get("anonymous") === "on";
 
   if (!clubId || !name) return;
-  await requireAdmin(clubId);
+  await requireMenuWrite(clubId, "BOARD");
 
   await prisma.board.create({
     data: { clubId, name, type, allowMemberPost, anonymous },
@@ -38,7 +39,7 @@ export async function deleteBoard(formData: FormData) {
   const id = formData.get("id") as string;
   const clubId = formData.get("clubId") as string;
   if (!id || !clubId) return;
-  await requireAdmin(clubId);
+  await requireMenuWrite(clubId, "BOARD");
 
   await prisma.board.delete({ where: { id } });
 

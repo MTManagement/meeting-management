@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
-import { isAdminGrade } from "@/lib/permissions";
 import CreateBoardForm from "@/components/CreateBoardForm";
 import MembershipRequiredNotice from "@/components/MembershipRequiredNotice";
+import AccessDeniedNotice from "@/components/AccessDeniedNotice";
+import { getViewerMenuAccess } from "@/lib/menuPermissions";
 import { deleteBoard } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -15,9 +16,11 @@ export default async function BoardPage({
 }) {
   const { clubId } = await params;
   const user = await requireUser();
-  const viewer = await prisma.member.findFirst({
-    where: { clubId, userId: user.id },
-  });
+  const { membership: viewer, access } = await getViewerMenuAccess(
+    clubId,
+    user.id,
+    "BOARD"
+  );
   if (!viewer) {
     return (
       <div>
@@ -26,7 +29,15 @@ export default async function BoardPage({
       </div>
     );
   }
-  const isAdmin = isAdminGrade(viewer.grade);
+  if (access === "NONE") {
+    return (
+      <div>
+        <h1 className="text-2xl font-bold mb-4">게시판</h1>
+        <AccessDeniedNotice />
+      </div>
+    );
+  }
+  const canWrite = access === "READ_WRITE";
   const boards = await prisma.board.findMany({
     where: { clubId },
     orderBy: { createdAt: "asc" },
@@ -43,7 +54,7 @@ export default async function BoardPage({
         있습니다.
       </p>
 
-      {isAdmin && (
+      {canWrite && (
         <div className="mb-4">
           <CreateBoardForm clubId={clubId} />
         </div>
@@ -72,7 +83,7 @@ export default async function BoardPage({
               <span className="rounded-full bg-gray-100 text-gray-600 text-xs px-2 py-0.5">
                 {board.type}
               </span>
-              {isAdmin && (
+              {canWrite && (
                 <form action={deleteBoard}>
                   <input type="hidden" name="id" value={board.id} />
                   <input type="hidden" name="clubId" value={clubId} />
