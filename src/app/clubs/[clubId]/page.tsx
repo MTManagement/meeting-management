@@ -20,7 +20,8 @@ export default async function IntroPage({
       {error === "main_admin_cannot_leave" && (
         <div className="rounded-md bg-red-50 text-red-600 text-sm px-3 py-2 mb-4">
           메인 관리자는 다른 회원에게 관리자 권한을 위임한 뒤에만 탈퇴할 수
-          있습니다.
+          있습니다. 설정 화면에서 관리자권한자에게 위임 요청을 보내고
+          상대방이 수락하면 탈퇴할 수 있습니다.
         </div>
       )}
       <h1 className="text-2xl font-bold mb-4">{club.name}</h1>

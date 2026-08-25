@@ -14,6 +14,9 @@ import {
   updateClubInfo,
   updateMemberRole,
   updateMenuPermissions,
+  requestAdminTransfer,
+  cancelAdminTransfer,
+  respondAdminTransfer,
 } from "./actions";
 
 const CONFIGURABLE_GRADES = ["ADMIN", "MEMBER"] as const;
@@ -45,6 +48,20 @@ export default async function SettingsPage({
       orderBy: { createdAt: "asc" },
     }),
   ]);
+
+  const [pendingTransfer, transferHistory] = await Promise.all([
+    prisma.adminTransferRequest.findFirst({
+      where: { clubId, status: "PENDING" },
+      include: { fromMember: true, toMember: true },
+    }),
+    prisma.adminTransferRequest.findMany({
+      where: { clubId, status: { in: ["ACCEPTED", "REJECTED", "CANCELED"] } },
+      include: { fromMember: true, toMember: true },
+      orderBy: { respondedAt: "desc" },
+      take: 10,
+    }),
+  ]);
+  const adminCandidates = members.filter((m) => m.grade === "ADMIN");
 
   const accessMatrix: Record<string, Record<string, Access>> = {};
   for (const grade of CONFIGURABLE_GRADES) {
@@ -165,6 +182,125 @@ export default async function SettingsPage({
             </div>
           ))}
         </div>
+      </section>
+
+      {/* 메인 관리자 위임 */}
+      <section>
+        <h2 className="font-semibold mb-3">메인 관리자 위임</h2>
+        <p className="text-xs text-gray-400 mb-3">
+          메인 관리자는 관리자권한자 중 한 명에게 위임을 요청할 수 있고,
+          상대방이 수락해야 위임이 완료됩니다. 위임이 완료되어야만 기존
+          메인 관리자가 모임을 탈퇴할 수 있습니다.
+        </p>
+
+        {pendingTransfer && pendingTransfer.toMemberId === viewer.id && (
+          <div className="rounded-lg border border-gray-200 bg-white p-4 mb-4">
+            <p className="text-sm mb-3">
+              <span className="font-medium">{pendingTransfer.fromMember.name}</span>
+              님이 메인 관리자 권한을 위임하려고 합니다. 수락하시겠습니까?
+            </p>
+            <div className="flex gap-2">
+              <form action={respondAdminTransfer}>
+                <input type="hidden" name="clubId" value={clubId} />
+                <input type="hidden" name="requestId" value={pendingTransfer.id} />
+                <input type="hidden" name="decision" value="accept" />
+                <button
+                  type="submit"
+                  className="rounded-md bg-gray-900 text-white text-xs px-3 py-1.5"
+                >
+                  수락
+                </button>
+              </form>
+              <form action={respondAdminTransfer}>
+                <input type="hidden" name="clubId" value={clubId} />
+                <input type="hidden" name="requestId" value={pendingTransfer.id} />
+                <input type="hidden" name="decision" value="reject" />
+                <button
+                  type="submit"
+                  className="rounded-md border border-gray-300 text-gray-600 text-xs px-3 py-1.5"
+                >
+                  거절
+                </button>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {pendingTransfer && pendingTransfer.toMemberId !== viewer.id && (
+          <div className="rounded-lg border border-gray-200 bg-white p-4 mb-4 flex items-center justify-between gap-3">
+            <p className="text-sm text-gray-600">
+              <span className="font-medium">{pendingTransfer.fromMember.name}</span>
+              님이{" "}
+              <span className="font-medium">{pendingTransfer.toMember.name}</span>
+              님에게 위임을 요청했습니다 (수락 대기중)
+            </p>
+            {isMainAdmin && pendingTransfer.fromMemberId === viewer.id && (
+              <form action={cancelAdminTransfer} className="shrink-0">
+                <input type="hidden" name="clubId" value={clubId} />
+                <input type="hidden" name="requestId" value={pendingTransfer.id} />
+                <button
+                  type="submit"
+                  className="rounded-md border border-gray-300 text-xs px-3 py-1.5 whitespace-nowrap"
+                >
+                  요청 취소
+                </button>
+              </form>
+            )}
+          </div>
+        )}
+
+        {!pendingTransfer && isMainAdmin && (
+          <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100 mb-4">
+            {adminCandidates.length === 0 && (
+              <div className="px-4 py-6 text-center text-gray-400 text-sm">
+                위임하려면 먼저 관리자권한자를 지정해주세요.
+              </div>
+            )}
+            {adminCandidates.map((m) => (
+              <div
+                key={m.id}
+                className="flex items-center justify-between px-4 py-3 gap-3"
+              >
+                <p className="text-sm font-medium">{m.name}</p>
+                <form action={requestAdminTransfer} className="shrink-0">
+                  <input type="hidden" name="clubId" value={clubId} />
+                  <input type="hidden" name="toMemberId" value={m.id} />
+                  <button
+                    type="submit"
+                    className="rounded-md border border-gray-300 text-xs px-3 py-1.5 whitespace-nowrap"
+                  >
+                    위임 요청 보내기
+                  </button>
+                </form>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {transferHistory.length > 0 && (
+          <div>
+            <h3 className="text-xs font-medium text-gray-500 mb-2">위임 이력</h3>
+            <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
+              {transferHistory.map((h) => (
+                <div key={h.id} className="px-4 py-2.5 text-xs text-gray-500">
+                  {h.fromMember.name} → {h.toMember.name}
+                  {" · "}
+                  {h.status === "ACCEPTED"
+                    ? "위임 완료"
+                    : h.status === "REJECTED"
+                      ? "거절됨"
+                      : "취소됨"}
+                  {h.respondedAt &&
+                    ` · ${new Intl.DateTimeFormat("ko-KR", {
+                      year: "numeric",
+                      month: "long",
+                      day: "numeric",
+                    }).format(h.respondedAt)}`}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       {/* 메뉴별 접근 권한 */}
