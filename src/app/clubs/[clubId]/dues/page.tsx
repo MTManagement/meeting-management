@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
-import { requireMembership } from "@/lib/auth";
+import { requireUser } from "@/lib/auth";
 import DuesControls from "@/components/DuesControls";
+import MembershipRequiredNotice from "@/components/MembershipRequiredNotice";
 import { saveDues } from "./actions";
 import {
   isPeriodType,
@@ -20,7 +21,18 @@ export default async function DuesPage({
   searchParams: Promise<{ year?: string; unit?: string }>;
 }) {
   const { clubId } = await params;
-  await requireMembership(clubId);
+  const user = await requireUser();
+  const viewer = await prisma.member.findFirst({
+    where: { clubId, userId: user.id },
+  });
+  if (!viewer) {
+    return (
+      <div>
+        <h1 className="text-2xl font-bold mb-4">회비 납부현황</h1>
+        <MembershipRequiredNotice />
+      </div>
+    );
+  }
   const sp = await searchParams;
   const year = Number(sp.year) || new Date().getFullYear();
   const periodType: PeriodType = isPeriodType(sp.unit ?? "")

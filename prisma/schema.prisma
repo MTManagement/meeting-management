@@ -12,25 +12,29 @@ datasource db {
 
 // 로그인 계정 (현재는 게스트/닉네임 로그인, 추후 카카오·구글 연동 예정)
 model User {
-  id        String   @id @default(cuid())
-  name      String
-  createdAt DateTime @default(now())
-  members   Member[]
+  id                 String              @id @default(cuid())
+  name               String
+  createdAt          DateTime            @default(now())
+  members            Member[]
+  membershipRequests MembershipRequest[]
 }
 
-// 동호회(모임)
+// 모임
 model Club {
-  id          String   @id @default(cuid())
-  name        String   @unique
-  description String?
-  createdAt   DateTime @default(now())
-  members     Member[]
-  events      Event[]
-  boards      Board[]
+  id                 String              @id @default(cuid())
+  name               String              @unique
+  description        String?
+  createdAt          DateTime            @default(now())
+  members            Member[]
+  events             Event[]
+  boards             Board[]
+  membershipRequests MembershipRequest[]
 }
 
 // 특정 모임에 속한 회원(가입 정보). userId가 있으면 실제 로그인 계정과 연결된 것,
 // 없으면 총무가 계정 없이 수동으로 등록해둔 회원.
+// role: 회장/총무 등 표시용 직책(자유 텍스트)
+// grade: 권한 등급 - "MAIN_ADMIN" | "ADMIN" | "MEMBER"
 model Member {
   id           String        @id @default(cuid())
   clubId       String
@@ -39,10 +43,25 @@ model Member {
   user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
   name         String
   role         String
+  grade        String        @default("MEMBER")
   phone        String
   createdAt    DateTime      @default(now())
   duesPayments DuesPayment[]
   attendances  Attendance[]
+}
+
+// 모임 가입 신청 (승인제). status: "PENDING" | "APPROVED" | "REJECTED"
+model MembershipRequest {
+  id        String   @id @default(cuid())
+  clubId    String
+  club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status    String   @default("PENDING")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([clubId, userId])
 }
 
 // periodType: "YEARLY" | "HALF" | "QUARTER" | "MONTH" | "WEEK"

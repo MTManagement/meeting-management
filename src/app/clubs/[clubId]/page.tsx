@@ -5,15 +5,24 @@ export const dynamic = "force-dynamic";
 
 export default async function IntroPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ clubId: string }>;
+  searchParams: Promise<{ error?: string }>;
 }) {
   const { clubId } = await params;
+  const { error } = await searchParams;
   const club = await prisma.club.findUnique({ where: { id: clubId } });
   if (!club) notFound();
 
   return (
     <div className="max-w-2xl">
+      {error === "main_admin_cannot_leave" && (
+        <div className="rounded-md bg-red-50 text-red-600 text-sm px-3 py-2 mb-4">
+          메인 관리자는 다른 회원에게 관리자 권한을 위임한 뒤에만 탈퇴할 수
+          있습니다.
+        </div>
+      )}
       <h1 className="text-2xl font-bold mb-4">{club.name}</h1>
       <p className="text-gray-600 mb-6">
         모임 소개, 회칙 등 정적 정보를 총무가 자유롭게 편집하는 페이지입니다.
@@ -22,7 +31,7 @@ export default async function IntroPage({
       <div className="rounded-lg border border-gray-200 bg-white p-6 space-y-3">
         <h2 className="font-semibold">모임 소개</h2>
         <p className="text-sm text-gray-500">
-          {club.description || "여기에 동호회 소개 문구, 활동 내용, 가입 안내 등이 표시됩니다."}
+          {club.description || "여기에 모임 소개 문구, 활동 내용, 가입 안내 등이 표시됩니다."}
         </p>
         <h2 className="font-semibold pt-2">회칙</h2>
         <p className="text-sm text-gray-500">

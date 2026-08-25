@@ -2,6 +2,19 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
+import { requireUser } from "@/lib/auth";
+import { requireAdmin, isAdminGrade } from "@/lib/permissions";
+
+async function requirePostAccess(clubId: string, boardId: string) {
+  const user = await requireUser();
+  const [membership, board] = await Promise.all([
+    prisma.member.findFirst({ where: { clubId, userId: user.id } }),
+    prisma.board.findUnique({ where: { id: boardId } }),
+  ]);
+  if (!membership || !board) return null;
+  if (!board.allowMemberPost && !isAdminGrade(membership.grade)) return null;
+  return { user, membership, board };
+}
 
 export async function createBoard(formData: FormData) {
   const clubId = formData.get("clubId") as string;
@@ -11,22 +24,26 @@ export async function createBoard(formData: FormData) {
   const anonymous = formData.get("anonymous") === "on";
 
   if (!clubId || !name) return;
+  await requireAdmin(clubId);
 
   await prisma.board.create({
     data: { clubId, name, type, allowMemberPost, anonymous },
   });
 
   revalidatePath(`/clubs/${clubId}/board`);
+  revalidatePath(`/clubs/${clubId}`, "layout");
 }
 
 export async function deleteBoard(formData: FormData) {
   const id = formData.get("id") as string;
   const clubId = formData.get("clubId") as string;
-  if (!id) return;
+  if (!id || !clubId) return;
+  await requireAdmin(clubId);
 
   await prisma.board.delete({ where: { id } });
 
   revalidatePath(`/clubs/${clubId}/board`);
+  revalidatePath(`/clubs/${clubId}`, "layout");
 }
 
 export async function createPost(formData: FormData) {
@@ -37,7 +54,9 @@ export async function createPost(formData: FormData) {
   const anonymous = formData.get("boardAnonymous") === "true";
   const authorInput = (formData.get("authorName") as string)?.trim();
 
-  if (!boardId || !title || !content) return;
+  if (!clubId || !boardId || !title || !content) return;
+  const access = await requirePostAccess(clubId, boardId);
+  if (!access) return;
 
   const authorName = anonymous ? "익명" : authorInput || "익명";
 
@@ -67,7 +86,9 @@ export async function createComment(formData: FormData) {
   const anonymous = formData.get("boardAnonymous") === "true";
   const authorInput = (formData.get("authorName") as string)?.trim();
 
-  if (!postId || !content) return;
+  if (!clubId || !boardId || !postId || !content) return;
+  const access = await requirePostAccess(clubId, boardId);
+  if (!access) return;
 
   const authorName = anonymous ? "익명" : authorInput || "익명";
 

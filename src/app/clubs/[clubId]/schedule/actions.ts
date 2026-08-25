@@ -2,12 +2,14 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
+import { requireAdmin } from "@/lib/permissions";
 
 export async function createEvent(formData: FormData) {
   const clubId = formData.get("clubId") as string;
   const title = (formData.get("title") as string)?.trim();
   const dateStr = formData.get("date") as string;
   if (!clubId || !title || !dateStr) return;
+  await requireAdmin(clubId);
 
   const location = (formData.get("location") as string)?.trim() || null;
   const address = (formData.get("address") as string)?.trim() || null;
@@ -35,7 +37,8 @@ export async function createEvent(formData: FormData) {
 export async function deleteEvent(formData: FormData) {
   const id = formData.get("id") as string;
   const clubId = formData.get("clubId") as string;
-  if (!id) return;
+  if (!id || !clubId) return;
+  await requireAdmin(clubId);
 
   await prisma.event.delete({ where: { id } });
 

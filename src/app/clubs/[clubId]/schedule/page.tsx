@@ -1,7 +1,9 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
-import { requireMembership } from "@/lib/auth";
+import { requireUser } from "@/lib/auth";
+import { isAdminGrade } from "@/lib/permissions";
 import CreateEventForm from "@/components/CreateEventForm";
+import MembershipRequiredNotice from "@/components/MembershipRequiredNotice";
 import { deleteEvent } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -22,7 +24,19 @@ export default async function SchedulePage({
   params: Promise<{ clubId: string }>;
 }) {
   const { clubId } = await params;
-  await requireMembership(clubId);
+  const user = await requireUser();
+  const viewer = await prisma.member.findFirst({
+    where: { clubId, userId: user.id },
+  });
+  if (!viewer) {
+    return (
+      <div>
+        <h1 className="text-2xl font-bold mb-4">일정</h1>
+        <MembershipRequiredNotice />
+      </div>
+    );
+  }
+  const isAdmin = isAdminGrade(viewer.grade);
   const events = await prisma.event.findMany({
     where: { clubId },
     orderBy: { date: "asc" },
@@ -37,9 +51,11 @@ export default async function SchedulePage({
         일정을 등록하고, 각 일정별로 참석 여부를 관리할 수 있습니다.
       </p>
 
-      <div className="mb-4">
-        <CreateEventForm clubId={clubId} />
-      </div>
+      {isAdmin && (
+        <div className="mb-4">
+          <CreateEventForm clubId={clubId} />
+        </div>
+      )}
 
       <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
         {events.length === 0 && (
@@ -66,16 +82,18 @@ export default async function SchedulePage({
               >
                 참석 관리
               </Link>
-              <form action={deleteEvent}>
-                <input type="hidden" name="id" value={event.id} />
-                <input type="hidden" name="clubId" value={clubId} />
-                <button
-                  type="submit"
-                  className="text-xs text-gray-400 hover:text-red-600"
-                >
-                  삭제
-                </button>
-              </form>
+              {isAdmin && (
+                <form action={deleteEvent}>
+                  <input type="hidden" name="id" value={event.id} />
+                  <input type="hidden" name="clubId" value={clubId} />
+                  <button
+                    type="submit"
+                    className="text-xs text-gray-400 hover:text-red-600"
+                  >
+                    삭제
+                  </button>
+                </form>
+              )}
             </div>
           </div>
         ))}

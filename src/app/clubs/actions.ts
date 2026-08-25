@@ -26,6 +26,7 @@ export async function createClub(formData: FormData) {
           userId: user.id,
           name: user.name,
           role: "총무",
+          grade: "MAIN_ADMIN",
           phone: "",
         },
       },
@@ -35,29 +36,27 @@ export async function createClub(formData: FormData) {
   redirect(`/clubs/${club.id}`);
 }
 
-export async function joinClub(formData: FormData) {
+// 가입 신청(승인제). 이미 가입돼 있으면 무시, 대기중이면 무시,
+// 과거에 거절된 적이 있으면 재신청으로 대기 상태로 되돌린다.
+export async function requestJoin(formData: FormData) {
   const user = await requireUser();
   const clubId = formData.get("clubId") as string;
   if (!clubId) return;
 
-  const existing = await prisma.member.findFirst({
+  const existingMember = await prisma.member.findFirst({
     where: { clubId, userId: user.id },
   });
-  if (existing) {
+  if (existingMember) {
     redirect(`/clubs/${clubId}`);
   }
 
-  await prisma.member.create({
-    data: {
-      clubId,
-      userId: user.id,
-      name: user.name,
-      role: "회원",
-      phone: "",
-    },
+  await prisma.membershipRequest.upsert({
+    where: { clubId_userId: { clubId, userId: user.id } },
+    update: { status: "PENDING" },
+    create: { clubId, userId: user.id, status: "PENDING" },
   });
 
-  revalidatePath("/home");
+  revalidatePath("/clubs");
   revalidatePath(`/clubs/${clubId}`);
   redirect(`/clubs/${clubId}`);
 }

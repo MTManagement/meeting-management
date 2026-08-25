@@ -1,7 +1,9 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
-import { requireMembership } from "@/lib/auth";
+import { requireUser } from "@/lib/auth";
 import AddMemberForm from "@/components/AddMemberForm";
+import MembershipRequiredNotice from "@/components/MembershipRequiredNotice";
+import { isAdminGrade } from "@/lib/permissions";
 import { deleteMember } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +14,19 @@ export default async function MembersPage({
   params: Promise<{ clubId: string }>;
 }) {
   const { clubId } = await params;
-  await requireMembership(clubId);
+  const user = await requireUser();
+  const viewer = await prisma.member.findFirst({
+    where: { clubId, userId: user.id },
+  });
+  if (!viewer) {
+    return (
+      <div>
+        <h1 className="text-2xl font-bold mb-4">회원 목록</h1>
+        <MembershipRequiredNotice />
+      </div>
+    );
+  }
+  const isAdmin = isAdminGrade(viewer.grade);
   const members = await prisma.member.findMany({
     where: { clubId },
     orderBy: { createdAt: "asc" },
@@ -35,9 +49,11 @@ export default async function MembersPage({
         확인할 수 있습니다.
       </p>
 
-      <div className="mb-4">
-        <AddMemberForm clubId={clubId} />
-      </div>
+      {isAdmin && (
+        <div className="mb-4">
+          <AddMemberForm clubId={clubId} />
+        </div>
+      )}
 
       <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
         <table className="w-full text-sm">
@@ -63,16 +79,18 @@ export default async function MembersPage({
                 <td className="px-4 py-3">{m.role}</td>
                 <td className="px-4 py-3">{m.phone}</td>
                 <td className="px-4 py-3 text-right">
-                  <form action={deleteMember}>
-                    <input type="hidden" name="id" value={m.id} />
-                    <input type="hidden" name="clubId" value={clubId} />
-                    <button
-                      type="submit"
-                      className="text-xs text-gray-400 hover:text-red-600"
-                    >
-                      삭제
-                    </button>
-                  </form>
+                  {isAdmin && m.grade !== "MAIN_ADMIN" && (
+                    <form action={deleteMember}>
+                      <input type="hidden" name="id" value={m.id} />
+                      <input type="hidden" name="clubId" value={clubId} />
+                      <button
+                        type="submit"
+                        className="text-xs text-gray-400 hover:text-red-600"
+                      >
+                        삭제
+                      </button>
+                    </form>
+                  )}
                 </td>
               </tr>
             ))}

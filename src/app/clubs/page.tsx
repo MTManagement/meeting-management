@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
-import { createClub, joinClub } from "./actions";
+import { createClub, requestJoin } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -14,16 +14,20 @@ export default async function ClubsSearchPage({
   const { q, error, name: duplicateName } = await searchParams;
   const query = q?.trim() ?? "";
 
-  const [clubs, myMemberships] = await Promise.all([
+  const [clubs, myMemberships, myPendingRequests] = await Promise.all([
     prisma.club.findMany({
       where: query ? { name: { contains: query, mode: "insensitive" } } : {},
       orderBy: { createdAt: "desc" },
       include: { _count: { select: { members: true } } },
     }),
     prisma.member.findMany({ where: { userId: user.id } }),
+    prisma.membershipRequest.findMany({
+      where: { userId: user.id, status: "PENDING" },
+    }),
   ]);
 
   const myClubIds = new Set(myMemberships.map((m) => m.clubId));
+  const myPendingClubIds = new Set(myPendingRequests.map((r) => r.clubId));
 
   return (
     <div className="min-h-screen bg-slate-200">
@@ -63,6 +67,7 @@ export default async function ClubsSearchPage({
           )}
           {clubs.map((club) => {
             const joined = myClubIds.has(club.id);
+            const pending = myPendingClubIds.has(club.id);
             return (
               <div
                 key={club.id}
@@ -81,14 +86,18 @@ export default async function ClubsSearchPage({
                   >
                     이동
                   </Link>
+                ) : pending ? (
+                  <span className="text-xs text-gray-400 shrink-0">
+                    승인 대기중
+                  </span>
                 ) : (
-                  <form action={joinClub}>
+                  <form action={requestJoin}>
                     <input type="hidden" name="clubId" value={club.id} />
                     <button
                       type="submit"
                       className="rounded-md bg-gray-900 text-white text-xs px-3 py-1.5 shrink-0"
                     >
-                      가입하기
+                      가입 신청
                     </button>
                   </form>
                 )}

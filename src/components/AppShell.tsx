@@ -5,18 +5,18 @@ import { usePathname } from "next/navigation";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { logout } from "@/app/login/actions";
+import AddMenuButton from "@/components/AddMenuButton";
 import DeleteClubButton from "@/components/DeleteClubButton";
 import JoinClubButton from "@/components/JoinClubButton";
 import LeaveClubButton from "@/components/LeaveClubButton";
 
-function getTabs(clubId: string, isMember: boolean) {
+type BoardSummary = { id: string; name: string };
+
+function getTabs(clubId: string) {
   const base = `/clubs/${clubId}`;
-  const introTab = { href: base, label: "동호회 소개" };
-
-  if (!isMember) return [introTab];
-
   return [
-    introTab,
+    { href: `${base}/main`, label: "모임 메인" },
+    { href: base, label: "모임 소개" },
     { href: `${base}/members`, label: "회원 목록" },
     { href: `${base}/dues`, label: "회비 납부현황" },
     { href: `${base}/board`, label: "게시판" },
@@ -26,44 +26,100 @@ function getTabs(clubId: string, isMember: boolean) {
 
 function NavLinks({
   clubId,
-  isMember,
+  isAdmin,
+  boards,
   onNavigate,
 }: {
   clubId: string;
-  isMember: boolean;
+  isAdmin: boolean;
+  boards: BoardSummary[];
   onNavigate?: () => void;
 }) {
   const pathname = usePathname();
-  const tabs = getTabs(clubId, isMember);
+  const tabs = getTabs(clubId);
+  const boardBase = `/clubs/${clubId}/board`;
 
   return (
     <nav className="flex flex-col p-2 gap-1">
       {tabs.map((tab) => {
         const active = pathname === tab.href;
         return (
+          <div key={tab.href}>
+            <Link
+              href={tab.href}
+              onClick={onNavigate}
+              className={`block rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                active
+                  ? "bg-gray-900 text-white"
+                  : "text-gray-600 hover:bg-gray-100"
+              }`}
+            >
+              {tab.label}
+            </Link>
+            {tab.href === boardBase && boards.length > 0 && (
+              <div className="ml-3 mt-1 flex flex-col gap-0.5 border-l border-gray-100 pl-2">
+                {boards.map((board) => {
+                  const href = `${boardBase}/${board.id}`;
+                  const boardActive = pathname === href;
+                  return (
+                    <Link
+                      key={board.id}
+                      href={href}
+                      onClick={onNavigate}
+                      className={`truncate rounded-md px-2 py-1.5 text-xs transition-colors ${
+                        boardActive
+                          ? "bg-gray-100 text-gray-900 font-medium"
+                          : "text-gray-500 hover:bg-gray-50"
+                      }`}
+                    >
+                      {board.name}
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {isAdmin && (
+        <>
+          <div className="my-1 border-t border-gray-100" />
+          <AddMenuButton clubId={clubId} />
           <Link
-            key={tab.href}
-            href={tab.href}
+            href={`/clubs/${clubId}/settings`}
             onClick={onNavigate}
             className={`rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-              active
+              pathname === `/clubs/${clubId}/settings`
                 ? "bg-gray-900 text-white"
                 : "text-gray-600 hover:bg-gray-100"
             }`}
           >
-            {tab.label}
+            설정
           </Link>
-        );
-      })}
+        </>
+      )}
     </nav>
   );
 }
 
-function Footer({ clubId, clubName, isMember }: { clubId: string; clubName: string; isMember: boolean }) {
+function Footer({
+  clubId,
+  clubName,
+  isMember,
+  isMainAdmin,
+  joinPending,
+}: {
+  clubId: string;
+  clubName: string;
+  isMember: boolean;
+  isMainAdmin: boolean;
+  joinPending: boolean;
+}) {
   if (!isMember) {
     return (
       <div className="p-2 border-t border-gray-100 space-y-2">
-        <JoinClubButton clubId={clubId} />
+        <JoinClubButton clubId={clubId} pending={joinPending} />
         <form action={logout}>
           <button
             type="submit"
@@ -79,7 +135,7 @@ function Footer({ clubId, clubName, isMember }: { clubId: string; clubName: stri
   return (
     <div className="p-2 border-t border-gray-100 space-y-1">
       <LeaveClubButton clubId={clubId} />
-      <DeleteClubButton clubId={clubId} clubName={clubName} />
+      {isMainAdmin && <DeleteClubButton clubId={clubId} clubName={clubName} />}
       <form action={logout}>
         <button
           type="submit"
@@ -96,11 +152,19 @@ export default function AppShell({
   clubId,
   clubName,
   isMember,
+  isAdmin,
+  isMainAdmin,
+  joinPending,
+  boards,
   children,
 }: {
   clubId: string;
   clubName: string;
   isMember: boolean;
+  isAdmin: boolean;
+  isMainAdmin: boolean;
+  joinPending: boolean;
+  boards: BoardSummary[];
   children: ReactNode;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -150,11 +214,18 @@ export default function AppShell({
             </div>
             <NavLinks
               clubId={clubId}
-              isMember={isMember}
+              isAdmin={isAdmin}
+              boards={boards}
               onNavigate={() => setMenuOpen(false)}
             />
             <div className="mt-auto">
-              <Footer clubId={clubId} clubName={clubName} isMember={isMember} />
+              <Footer
+                clubId={clubId}
+                clubName={clubName}
+                isMember={isMember}
+                isMainAdmin={isMainAdmin}
+                joinPending={joinPending}
+              />
             </div>
           </div>
         </div>
@@ -168,9 +239,15 @@ export default function AppShell({
           </Link>
           <p className="font-semibold text-gray-900">{clubName}</p>
         </div>
-        <NavLinks clubId={clubId} isMember={isMember} />
+        <NavLinks clubId={clubId} isAdmin={isAdmin} boards={boards} />
         <div className="mt-auto">
-          <Footer clubId={clubId} clubName={clubName} isMember={isMember} />
+          <Footer
+            clubId={clubId}
+            clubName={clubName}
+            isMember={isMember}
+            isMainAdmin={isMainAdmin}
+            joinPending={joinPending}
+          />
         </div>
       </aside>
 
