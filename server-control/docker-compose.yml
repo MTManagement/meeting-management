@@ -1,0 +1,28 @@
+services:
+  mtmanagement-control:
+    build: .
+    image: mtmanagement-control:latest
+    container_name: mtmanagement-control
+    restart: unless-stopped
+    ports:
+      - "3102:3102"
+    environment:
+      - PORT=3102
+      - CONTROL_PASSWORD=${CONTROL_PASSWORD}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - GITEA_HOST=git.snaphy.co.kr
+      - GITEA_TOKEN=${GITEA_TOKEN}
+      - GITEA_USERNAME=${GITEA_USERNAME}
+      - GITEA_PASSWORD=${GITEA_PASSWORD}
+      - APP_CONTAINER=mtmanagement-server
+      - REPO_DIR=/volume1/docker/mtmanagement/repo
+      - SERVER_DIR=/volume1/docker/mtmanagement/server
+      - REPO_SLUG=MTManagement/meeting-management
+      - BRANCH=main
+    volumes:
+      # 호스트 도커 소켓 마운트 → 컨테이너 안에서 나스의 다른 컨테이너 제어
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 호스트와 동일 경로로 1:1 마운트 (docker-compose가 호스트 데몬에 전달하는
+      # 빌드 컨텍스트/볼륨 경로가 컨테이너 안에서 본 경로와 일치해야 함)
+      - /volume1/docker/mtmanagement/repo:/volume1/docker/mtmanagement/repo
+      - /volume1/docker/mtmanagement/server:/volume1/docker/mtmanagement/server
