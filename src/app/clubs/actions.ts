@@ -25,7 +25,7 @@ export async function createClub(formData: FormData) {
         create: {
           userId: user.id,
           name: user.name,
-          role: "총무",
+          role: "",
           grade: "MAIN_ADMIN",
           phone: "",
         },

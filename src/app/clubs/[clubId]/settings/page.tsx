@@ -1,19 +1,14 @@
 import { prisma } from "@/lib/prisma";
-import { requireAdmin, isMainAdminGrade } from "@/lib/permissions";
+import { requireAdmin, isMainAdminGrade, gradeLabel } from "@/lib/permissions";
 import {
   approveMembershipRequest,
   rejectMembershipRequest,
   setMemberGrade,
   updateClubInfo,
+  updateMemberRole,
 } from "./actions";
 
 export const dynamic = "force-dynamic";
-
-const GRADE_LABEL: Record<string, string> = {
-  MAIN_ADMIN: "메인 관리자",
-  ADMIN: "관리자권한자",
-  MEMBER: "일반 회원",
-};
 
 export default async function SettingsPage({
   params,
@@ -99,38 +94,51 @@ export default async function SettingsPage({
         </p>
         <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
           {members.map((m) => (
-            <div
-              key={m.id}
-              className="flex items-center justify-between px-4 py-3 gap-3"
-            >
-              <div className="min-w-0">
-                <p className="text-sm font-medium truncate">
-                  {m.name}
-                  <span className="ml-2 text-xs text-gray-400">
-                    {m.role}
-                  </span>
-                </p>
-                <p className="text-xs text-gray-400">
-                  {GRADE_LABEL[m.grade] ?? m.grade}
-                </p>
+            <div key={m.id} className="px-4 py-3 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium truncate">{m.name}</p>
+                  <p className="text-sm font-semibold text-gray-900">
+                    {gradeLabel(m.grade)}
+                  </p>
+                </div>
+                {isMainAdmin && m.grade !== "MAIN_ADMIN" && (
+                  <form action={setMemberGrade} className="shrink-0">
+                    <input type="hidden" name="clubId" value={clubId} />
+                    <input type="hidden" name="memberId" value={m.id} />
+                    <input
+                      type="hidden"
+                      name="grade"
+                      value={m.grade === "ADMIN" ? "MEMBER" : "ADMIN"}
+                    />
+                    <button
+                      type="submit"
+                      className="rounded-md border border-gray-300 text-xs px-3 py-1.5 whitespace-nowrap"
+                    >
+                      {m.grade === "ADMIN"
+                        ? "일반 회원으로 되돌리기"
+                        : "관리자권한자로 승격"}
+                    </button>
+                  </form>
+                )}
               </div>
-              {isMainAdmin && m.grade !== "MAIN_ADMIN" && (
-                <form action={setMemberGrade} className="shrink-0">
-                  <input type="hidden" name="clubId" value={clubId} />
-                  <input type="hidden" name="memberId" value={m.id} />
-                  <input
-                    type="hidden"
-                    name="grade"
-                    value={m.grade === "ADMIN" ? "MEMBER" : "ADMIN"}
-                  />
-                  <button
-                    type="submit"
-                    className="rounded-md border border-gray-300 text-xs px-3 py-1.5 whitespace-nowrap"
-                  >
-                    {m.grade === "ADMIN" ? "권한 회수" : "관리자 위임"}
-                  </button>
-                </form>
-              )}
+
+              <form action={updateMemberRole} className="flex items-center gap-2">
+                <input type="hidden" name="clubId" value={clubId} />
+                <input type="hidden" name="memberId" value={m.id} />
+                <input
+                  name="role"
+                  defaultValue={m.role}
+                  placeholder="모임 내 표시 직책 (예: 회장, 총무 - 선택 입력)"
+                  className="flex-1 rounded-md border border-gray-300 px-2 py-1.5 text-xs"
+                />
+                <button
+                  type="submit"
+                  className="rounded-md border border-gray-300 text-xs px-3 py-1.5 whitespace-nowrap"
+                >
+                  저장
+                </button>
+              </form>
             </div>
           ))}
         </div>

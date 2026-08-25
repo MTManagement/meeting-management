@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
 import AddMemberForm from "@/components/AddMemberForm";
 import MembershipRequiredNotice from "@/components/MembershipRequiredNotice";
-import { isAdminGrade } from "@/lib/permissions";
+import { isAdminGrade, gradeLabel } from "@/lib/permissions";
 import { deleteMember } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -60,6 +60,7 @@ export default async function MembersPage({
           <thead>
             <tr className="border-b border-gray-200 bg-gray-50 text-left">
               <th className="px-4 py-3 font-medium">이름</th>
+              <th className="px-4 py-3 font-medium">등급</th>
               <th className="px-4 py-3 font-medium">직책</th>
               <th className="px-4 py-3 font-medium">연락처</th>
               <th className="px-4 py-3 font-medium"></th>
@@ -68,7 +69,7 @@ export default async function MembersPage({
           <tbody>
             {members.length === 0 && (
               <tr>
-                <td colSpan={4} className="px-4 py-6 text-center text-gray-400">
+                <td colSpan={5} className="px-4 py-6 text-center text-gray-400">
                   등록된 회원이 없습니다. 위 버튼으로 회원을 추가해보세요.
                 </td>
               </tr>
@@ -76,7 +77,8 @@ export default async function MembersPage({
             {members.map((m) => (
               <tr key={m.id} className="border-b border-gray-100 last:border-0">
                 <td className="px-4 py-3">{m.name}</td>
-                <td className="px-4 py-3">{m.role}</td>
+                <td className="px-4 py-3 font-medium">{gradeLabel(m.grade)}</td>
+                <td className="px-4 py-3 text-gray-500">{m.role || "-"}</td>
                 <td className="px-4 py-3">{m.phone}</td>
                 <td className="px-4 py-3 text-right">
                   {isAdmin && m.grade !== "MAIN_ADMIN" && (

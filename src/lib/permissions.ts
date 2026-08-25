@@ -5,6 +5,16 @@ import { requireUser } from "@/lib/auth";
 // grade: "MAIN_ADMIN"(모임 생성자, 1명) | "ADMIN"(위임받은 관리자권한자) | "MEMBER"(일반 회원)
 export type Grade = "MAIN_ADMIN" | "ADMIN" | "MEMBER";
 
+export const GRADE_LABEL: Record<string, string> = {
+  MAIN_ADMIN: "관리자",
+  ADMIN: "관리자권한자",
+  MEMBER: "일반 회원",
+};
+
+export function gradeLabel(grade: string) {
+  return GRADE_LABEL[grade] ?? grade;
+}
+
 export function isAdminGrade(grade: string) {
   return grade === "MAIN_ADMIN" || grade === "ADMIN";
 }

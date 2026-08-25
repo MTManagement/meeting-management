@@ -81,6 +81,25 @@ export async function setMemberGrade(formData: FormData) {
   revalidatePath(`/clubs/${clubId}/members`);
 }
 
+// 회원의 모임 내 표시용 직책(회장/총무/부회장 등, 자유 텍스트) 수정.
+// 로그인 닉네임과는 무관하며, 이 모임 안에서만 쓰이는 표시 이름이다.
+export async function updateMemberRole(formData: FormData) {
+  const clubId = formData.get("clubId") as string;
+  const memberId = formData.get("memberId") as string;
+  const role = (formData.get("role") as string)?.trim() ?? "";
+  if (!clubId || !memberId) return;
+  await requireAdmin(clubId);
+
+  const target = await prisma.member.findUnique({ where: { id: memberId } });
+  if (!target || target.clubId !== clubId) return;
+
+  await prisma.member.update({ where: { id: memberId }, data: { role } });
+
+  revalidatePath(`/clubs/${clubId}/settings`);
+  revalidatePath(`/clubs/${clubId}/members`);
+  revalidatePath("/home");
+}
+
 export async function updateClubInfo(formData: FormData) {
   const clubId = formData.get("clubId") as string;
   const name = (formData.get("name") as string)?.trim();

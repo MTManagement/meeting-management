@@ -2,6 +2,7 @@ import Link from "next/link";
 import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logout } from "@/app/login/actions";
+import { gradeLabel } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -81,7 +82,10 @@ export default async function HomePage() {
                   {m.club.name.slice(0, 1)}
                 </div>
                 <p className="font-medium text-sm truncate">{m.club.name}</p>
-                <p className="text-xs text-gray-400 mt-0.5">{m.role}</p>
+                <p className="text-xs text-gray-600 font-medium mt-0.5">
+                  {gradeLabel(m.grade)}
+                  {m.role ? ` · ${m.role}` : ""}
+                </p>
               </Link>
             ))}
           </div>
