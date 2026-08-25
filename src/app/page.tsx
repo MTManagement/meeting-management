@@ -140,6 +140,9 @@ export default function LandingPage() {
 
       <footer className="border-t border-gray-100 py-6 text-center text-xs text-gray-400">
         SNAPHY · 모임 관리 플랫폼
+        <span className="block mt-1 text-[10px] text-gray-300">
+          deploy check 2026-08-25
+        </span>
       </footer>
     </div>
   );
