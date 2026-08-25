@@ -32,6 +32,9 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 # 전체 node_modules(및 schema)를 덧씌운다 - 이미지 크기보다 안정성 우선.
 COPY --from=deps --chown=nextjs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
+# prisma.config.ts에 datasource.url(process.env.DATABASE_URL) 매핑이 있는데
+# 이 파일 자체를 빼먹으면 Prisma가 설정을 못 찾아 "datasource.url is required"로 실패함
+COPY --from=builder --chown=nextjs:nodejs /app/prisma.config.ts ./prisma.config.ts
 COPY --chown=nextjs:nodejs docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x ./docker-entrypoint.sh
 
