@@ -18,6 +18,7 @@ import {
   cancelAdminTransfer,
   respondAdminTransfer,
 } from "./actions";
+import { deleteMember } from "../members/actions";
 
 const CONFIGURABLE_GRADES = ["ADMIN", "MEMBER"] as const;
 const ACCESS_OPTIONS: Access[] = ["READ_WRITE", "READ_ONLY", "NONE"];
@@ -142,25 +143,39 @@ export default async function SettingsPage({
                     {gradeLabel(m.grade)}
                   </p>
                 </div>
-                {isMainAdmin && m.grade !== "MAIN_ADMIN" && (
-                  <form action={setMemberGrade} className="shrink-0">
-                    <input type="hidden" name="clubId" value={clubId} />
-                    <input type="hidden" name="memberId" value={m.id} />
-                    <input
-                      type="hidden"
-                      name="grade"
-                      value={m.grade === "ADMIN" ? "MEMBER" : "ADMIN"}
-                    />
-                    <button
-                      type="submit"
-                      className="rounded-md border border-gray-300 text-xs px-3 py-1.5 whitespace-nowrap"
-                    >
-                      {m.grade === "ADMIN"
-                        ? "일반 회원으로 되돌리기"
-                        : "관리자권한자로 승격"}
-                    </button>
-                  </form>
-                )}
+                <div className="flex items-center gap-2 shrink-0">
+                  {isMainAdmin && m.grade !== "MAIN_ADMIN" && (
+                    <form action={setMemberGrade}>
+                      <input type="hidden" name="clubId" value={clubId} />
+                      <input type="hidden" name="memberId" value={m.id} />
+                      <input
+                        type="hidden"
+                        name="grade"
+                        value={m.grade === "ADMIN" ? "MEMBER" : "ADMIN"}
+                      />
+                      <button
+                        type="submit"
+                        className="rounded-md border border-gray-300 text-xs px-3 py-1.5 whitespace-nowrap"
+                      >
+                        {m.grade === "ADMIN"
+                          ? "일반 회원으로 되돌리기"
+                          : "관리자권한자로 승격"}
+                      </button>
+                    </form>
+                  )}
+                  {m.grade !== "MAIN_ADMIN" && (
+                    <form action={deleteMember}>
+                      <input type="hidden" name="clubId" value={clubId} />
+                      <input type="hidden" name="id" value={m.id} />
+                      <button
+                        type="submit"
+                        className="text-xs text-gray-400 hover:text-red-600 whitespace-nowrap"
+                      >
+                        강제 탈퇴
+                      </button>
+                    </form>
+                  )}
+                </div>
               </div>
 
               <form action={updateMemberRole} className="flex items-center gap-2">

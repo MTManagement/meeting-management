@@ -31,6 +31,7 @@ model Club {
   membershipRequests    MembershipRequest[]
   menuPermissions       MenuPermission[]
   adminTransferRequests AdminTransferRequest[]
+  memberColumns         MemberColumn[]
 }
 
 // 특정 모임에 속한 회원(가입 정보). userId가 있으면 실제 로그인 계정과 연결된 것,
@@ -53,6 +54,30 @@ model Member {
 
   transferRequestsSent     AdminTransferRequest[] @relation("TransferFrom")
   transferRequestsReceived AdminTransferRequest[] @relation("TransferTo")
+  fieldValues              MemberFieldValue[]
+}
+
+// 회원 목록의 관리자 정의 자유 컬럼 (완전 자유 폼빌더 대신 "컬럼명 추가 +
+// 값 입력" 수준의 축소판). order는 표시 순서(생성 순).
+model MemberColumn {
+  id        String             @id @default(cuid())
+  clubId    String
+  club      Club               @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  name      String
+  order     Int                @default(0)
+  createdAt DateTime           @default(now())
+  values    MemberFieldValue[]
+}
+
+model MemberFieldValue {
+  id       String       @id @default(cuid())
+  memberId String
+  member   Member       @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  columnId String
+  column   MemberColumn @relation(fields: [columnId], references: [id], onDelete: Cascade)
+  value    String
+
+  @@unique([memberId, columnId])
 }
 
 // 등급별 메뉴 접근 권한. MAIN_ADMIN은 항상 전체 허용이라 저장하지 않는다.
