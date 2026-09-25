@@ -14,7 +14,10 @@ RETRY_DELAY=5
 attempt=1
 while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
   echo "[entrypoint] db push 시도 $attempt/$MAX_ATTEMPTS..."
-  if node node_modules/prisma/build/index.js db push --accept-data-loss; then
+  # 개발 초기 단계라 실사용자 데이터가 없어 --force-reset을 사용한다.
+  # (컬럼 추가/삭제가 잦은 구조 변경은 --accept-data-loss만으로 처리 안 될 수 있음)
+  # 실사용자 데이터가 생기면 이 플래그는 반드시 재검토해야 한다.
+  if node node_modules/prisma/build/index.js db push --force-reset --accept-data-loss; then
     echo "[entrypoint] db push 성공"
     break
   fi
