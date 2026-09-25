@@ -16,6 +16,16 @@ const PAPER_BG = 0xfaf6ee;
 const PENCIL = 0x4b4b4b;
 const PENCIL_LIGHT = 0x9a9284;
 
+// 모든 좌표·오프셋 값의 단위는 mm. Three.js 씬 내부는 보기 좋은 스케일을 위해
+// 1 scene 단위 = 1000mm(=1m)로 렌더링만 축소해서 그린다.
+const MM_PER_SCENE_UNIT = 1000;
+function mmToScene(mm: number) {
+  return mm / MM_PER_SCENE_UNIT;
+}
+function sceneToMm(units: number) {
+  return Math.round(units * MM_PER_SCENE_UNIT);
+}
+
 const BASE_PLANES: PlaneDef[] = [
   { axis: "XY", offset: 0 },
   { axis: "YZ", offset: 0 },
@@ -27,9 +37,10 @@ function planeKey(p: PlaneDef) {
 }
 
 function toThreePlane(p: PlaneDef): THREE.Plane {
-  if (p.axis === "XY") return new THREE.Plane(new THREE.Vector3(0, 0, 1), -p.offset);
-  if (p.axis === "YZ") return new THREE.Plane(new THREE.Vector3(1, 0, 0), -p.offset);
-  return new THREE.Plane(new THREE.Vector3(0, 1, 0), -p.offset);
+  const offset = mmToScene(p.offset);
+  if (p.axis === "XY") return new THREE.Plane(new THREE.Vector3(0, 0, 1), -offset);
+  if (p.axis === "YZ") return new THREE.Plane(new THREE.Vector3(1, 0, 0), -offset);
+  return new THREE.Plane(new THREE.Vector3(0, 1, 0), -offset);
 }
 
 function planeMeshRotation(axis: Axis): [number, number, number] {
@@ -39,9 +50,10 @@ function planeMeshRotation(axis: Axis): [number, number, number] {
 }
 
 function planeMeshPosition(p: PlaneDef): [number, number, number] {
-  if (p.axis === "XY") return [0, 0, p.offset];
-  if (p.axis === "YZ") return [p.offset, 0, 0];
-  return [0, p.offset, 0];
+  const offset = mmToScene(p.offset);
+  if (p.axis === "XY") return [0, 0, offset];
+  if (p.axis === "YZ") return [offset, 0, 0];
+  return [0, offset, 0];
 }
 
 export default function SketchCanvas({
@@ -89,6 +101,7 @@ export default function SketchCanvas({
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [pointCount, setPointCount] = useState(initialPoints.length);
   const [edgeCount, setEdgeCount] = useState(initialEdges.length);
+  const [cursorMm, setCursorMm] = useState<{ x: number; y: number; z: number } | null>(null);
 
   useEffect(() => {
     for (const p of initialPoints) pointsRef.current.set(p.id, p);
@@ -99,7 +112,7 @@ export default function SketchCanvas({
     const geo = new THREE.SphereGeometry(0.06, 12, 12);
     const mat = new THREE.MeshBasicMaterial({ color: PENCIL });
     const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(p.x, p.y, p.z);
+    mesh.position.set(mmToScene(p.x), mmToScene(p.y), mmToScene(p.z));
     pointGroupRef.current?.add(mesh);
     pointMeshesRef.current.set(id, mesh);
   }
@@ -118,8 +131,8 @@ export default function SketchCanvas({
     const to = pointsRef.current.get(e.toId);
     if (!from || !to) return;
     const geo = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(from.x, from.y, from.z),
-      new THREE.Vector3(to.x, to.y, to.z),
+      new THREE.Vector3(mmToScene(from.x), mmToScene(from.y), mmToScene(from.z)),
+      new THREE.Vector3(mmToScene(to.x), mmToScene(to.y), mmToScene(to.z)),
     ]);
     const mat = new THREE.LineBasicMaterial({ color: PENCIL });
     const line = new THREE.Line(geo, mat);
@@ -229,9 +242,11 @@ export default function SketchCanvas({
 
   function findNearbyPoint(pos: THREE.Vector3): string | null {
     let best: string | null = null;
-    let bestDist = 0.18;
+    let bestDist = 0.18; // scene 단위 (≈180mm) 이내면 기존 점에 스냅
     for (const [id, p] of pointsRef.current) {
-      const d = pos.distanceTo(new THREE.Vector3(p.x, p.y, p.z));
+      const d = pos.distanceTo(
+        new THREE.Vector3(mmToScene(p.x), mmToScene(p.y), mmToScene(p.z))
+      );
       if (d < bestDist) {
         bestDist = d;
         best = id;
@@ -240,16 +255,15 @@ export default function SketchCanvas({
     return best;
   }
 
-  function handleCanvasClick(e: React.MouseEvent) {
+  function raycastToActivePlane(clientX: number, clientY: number): THREE.Vector3 | null {
     const mount = mountRef.current;
     const camera = cameraRef.current;
-    const scene = sceneRef.current;
-    if (!mount || !camera || !scene) return;
+    if (!mount || !camera) return null;
 
     const rect = mount.getBoundingClientRect();
     const mouse = new THREE.Vector2(
-      ((e.clientX - rect.left) / rect.width) * 2 - 1,
-      -((e.clientY - rect.top) / rect.height) * 2 + 1
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
     );
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(mouse, camera);
@@ -257,12 +271,28 @@ export default function SketchCanvas({
     const plane = toThreePlane(activePlaneRef.current);
     const target = new THREE.Vector3();
     const hit = raycaster.ray.intersectPlane(plane, target);
-    if (!hit) return;
+    return hit ? target : null;
+  }
+
+  function handleCanvasMove(e: React.MouseEvent) {
+    const target = raycastToActivePlane(e.clientX, e.clientY);
+    if (!target) return;
+    setCursorMm({ x: sceneToMm(target.x), y: sceneToMm(target.y), z: sceneToMm(target.z) });
+  }
+
+  function handleCanvasClick(e: React.MouseEvent) {
+    const target = raycastToActivePlane(e.clientX, e.clientY);
+    if (!target) return;
 
     let pointId = findNearbyPoint(target);
     if (!pointId) {
       pointId = `tmp_${crypto.randomUUID()}`;
-      const rec: PointRec = { id: pointId, x: target.x, y: target.y, z: target.z };
+      const rec: PointRec = {
+        id: pointId,
+        x: sceneToMm(target.x),
+        y: sceneToMm(target.y),
+        z: sceneToMm(target.z),
+      };
       pointsRef.current.set(pointId, rec);
       addPointMesh(pointId, rec);
       setPointCount(pointsRef.current.size);
@@ -404,7 +434,7 @@ export default function SketchCanvas({
                         : "bg-white text-gray-600 border-gray-300"
                     }`}
                   >
-                    {p.axis}+{p.offset}
+                    {p.axis}+{p.offset}mm
                   </button>
                 );
               })}
@@ -424,9 +454,10 @@ export default function SketchCanvas({
           <input
             value={offsetInput}
             onChange={(e) => setOffsetInput(e.target.value)}
-            className="w-16 text-xs border border-gray-300 rounded-md px-2 py-1.5 bg-white"
-            placeholder="거리(m)"
+            className="w-20 text-xs border border-gray-300 rounded-md px-2 py-1.5 bg-white"
+            placeholder="거리(mm)"
           />
+          <span className="text-[11px] text-gray-400">mm</span>
           <button
             onClick={handleAddOffsetPlane}
             className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
@@ -463,14 +494,27 @@ export default function SketchCanvas({
       </div>
 
       <div className="px-4 py-1 text-[11px] text-gray-400 flex gap-4">
+        <span className="px-1.5 py-0.5 rounded bg-gray-900/5 text-gray-600 font-medium">
+          단위: mm
+        </span>
         <span>점 {pointCount}개 · 선 {edgeCount}개</span>
         <span>
           현재 평면: <b className="text-gray-600">{activePlaneKey}</b>
         </span>
+        {cursorMm && (
+          <span>
+            커서: {cursorMm.x}, {cursorMm.y}, {cursorMm.z} mm
+          </span>
+        )}
         {savedAt && <span>마지막 저장: {savedAt.toLocaleTimeString("ko-KR")}</span>}
       </div>
 
-      <div ref={mountRef} className="flex-1" onClick={handleCanvasClick} />
+      <div
+        ref={mountRef}
+        className="flex-1"
+        onClick={handleCanvasClick}
+        onMouseMove={handleCanvasMove}
+      />
     </div>
   );
 }
