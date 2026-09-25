@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "모임 관리 플랫폼",
-  description: "모임용 Notion - 회원관리·회비정산·일정·게시판",
+  title: "PaperSketch",
+  description: "종이에 연필로 그리듯, 여러 평면 위에 선을 그어 3D 공간을 만드는 스케치 도구",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

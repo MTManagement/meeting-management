@@ -2,97 +2,80 @@ import Link from "next/link";
 import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logout } from "@/app/login/actions";
-import { gradeLabel } from "@/lib/permissions";
+import { createProject } from "./actions";
 
 export const dynamic = "force-dynamic";
+
+function formatDate(date: Date) {
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "long",
+    day: "numeric",
+  }).format(date);
+}
 
 export default async function HomePage() {
   const user = await requireUser();
 
-  const memberships = await prisma.member.findMany({
-    where: { userId: user.id },
-    include: { club: true },
-    orderBy: { createdAt: "asc" },
+  const projects = await prisma.project.findMany({
+    where: { ownerId: user.id },
+    orderBy: { updatedAt: "desc" },
   });
 
   return (
-    <div className="min-h-screen bg-slate-200">
+    <div className="min-h-screen bg-[#faf6ee]">
       <div className="mx-auto max-w-3xl px-4 py-10">
         <div className="flex items-center justify-between mb-8">
           <div>
             <p className="text-sm text-gray-500">안녕하세요,</p>
             <p className="text-lg font-bold text-gray-900">{user.name}님</p>
           </div>
-          <div className="flex items-center gap-3">
-            <Link
-              href="/mypage"
-              className="text-xs text-gray-500 hover:text-gray-900"
+          <form action={logout}>
+            <button
+              type="submit"
+              className="text-xs text-gray-400 hover:text-gray-700"
             >
-              마이페이지
-            </Link>
-            <form action={logout}>
-              <button
-                type="submit"
-                className="text-xs text-gray-400 hover:text-gray-700"
-              >
-                로그아웃
-              </button>
-            </form>
-          </div>
+              로그아웃
+            </button>
+          </form>
         </div>
 
-        <form action="/clubs" className="flex gap-2 mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <h1 className="text-lg font-bold">내 프로젝트</h1>
+          <span className="text-sm text-gray-400">{projects.length}개</span>
+        </div>
+
+        <form action={createProject} className="flex gap-2 mb-6">
           <input
-            name="q"
-            placeholder="모임 이름으로 검색"
+            name="name"
+            placeholder="새 프로젝트 이름 (예: 거실 리모델링)"
+            required
             className="flex-1 rounded-md border border-gray-300 bg-white px-4 py-2.5 text-sm"
           />
           <button
             type="submit"
-            className="rounded-md bg-white border border-gray-300 text-sm px-4 py-2.5"
-          >
-            검색
-          </button>
-          <Link
-            href="/clubs"
             className="rounded-md bg-gray-900 text-white text-sm px-4 py-2.5 whitespace-nowrap"
           >
-            + 모임 생성
-          </Link>
+            + 만들기
+          </button>
         </form>
 
-        <div className="flex items-center justify-between mb-3 mt-8">
-          <h1 className="text-lg font-bold">내 모임</h1>
-          <span className="text-sm text-gray-400">{memberships.length}개</span>
-        </div>
-
-        {memberships.length === 0 ? (
+        {projects.length === 0 ? (
           <div className="rounded-lg border border-dashed border-gray-300 bg-white/60 px-4 py-12 text-center">
-            <p className="text-gray-400 text-sm mb-4">
-              아직 가입한 모임이 없습니다.
+            <p className="text-gray-400 text-sm">
+              아직 프로젝트가 없습니다. 위에서 새 프로젝트를 만들어보세요.
             </p>
-            <Link
-              href="/clubs"
-              className="inline-block rounded-md bg-gray-900 text-white text-sm px-4 py-2"
-            >
-              모임 찾기 / 만들기
-            </Link>
           </div>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            {memberships.map((m) => (
+            {projects.map((p) => (
               <Link
-                key={m.id}
-                href={`/clubs/${m.club.id}`}
+                key={p.id}
+                href={`/project/${p.id}`}
                 className="rounded-lg border border-gray-200 bg-white p-4 hover:shadow-md hover:border-gray-300 transition-shadow"
               >
-                <div className="w-10 h-10 rounded-full bg-gray-900 text-white flex items-center justify-center font-bold text-sm mb-3">
-                  {m.club.name.slice(0, 1)}
-                </div>
-                <p className="font-medium text-sm truncate">{m.club.name}</p>
-                <p className="text-xs text-gray-600 font-medium mt-0.5">
-                  {gradeLabel(m.grade)}
-                  {m.role ? ` · ${m.role}` : ""}
+                <p className="font-medium text-sm truncate">{p.name}</p>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {formatDate(p.updatedAt)}
                 </p>
               </Link>
             ))}
