@@ -1,7 +1,8 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
-import SketchCanvas from "./SketchCanvas";
+import { ensureBasePlanes } from "./actions";
+import ProjectCanvas from "./ProjectCanvas";
 
 export const dynamic = "force-dynamic";
 
@@ -16,18 +17,36 @@ export default async function ProjectPage({
   const project = await prisma.project.findUnique({ where: { id: projectId } });
   if (!project || project.ownerId !== user.id) notFound();
 
-  const [planes, points, edges] = await Promise.all([
-    prisma.plane.findMany({ where: { projectId } }),
-    prisma.point.findMany({ where: { projectId } }),
-    prisma.edge.findMany({ where: { projectId } }),
-  ]);
+  await ensureBasePlanes(projectId);
+
+  const planes = await prisma.plane.findMany({
+    where: { projectId },
+    include: {
+      sketches: {
+        include: { points: true, edges: true },
+        orderBy: { createdAt: "asc" },
+      },
+    },
+    orderBy: { createdAt: "asc" },
+  });
 
   return (
-    <SketchCanvas
+    <ProjectCanvas
       projectId={projectId}
-      initialPlanes={planes.map((p) => ({ axis: p.axis as "XY" | "YZ" | "XZ", offset: p.offset }))}
-      initialPoints={points.map((p) => ({ id: p.id, x: p.x, y: p.y, z: p.z }))}
-      initialEdges={edges.map((e) => ({ id: e.id, fromId: e.fromId, toId: e.toId }))}
+      projectName={project.name}
+      planes={planes.map((p) => ({
+        id: p.id,
+        label: p.label,
+        origin: { x: p.originX, y: p.originY, z: p.originZ },
+        normal: { x: p.normalX, y: p.normalY, z: p.normalZ },
+        uAxis: { x: p.uAxisX, y: p.uAxisY, z: p.uAxisZ },
+        sketches: p.sketches.map((s) => ({
+          id: s.id,
+          name: s.name,
+          points: s.points.map((pt) => ({ id: pt.id, x: pt.x, y: pt.y, z: pt.z })),
+          edges: s.edges.map((e) => ({ id: e.id, fromId: e.fromId, toId: e.toId })),
+        })),
+      }))}
     />
   );
 }

@@ -28,32 +28,58 @@ model Project {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  planes Plane[]
-  points Point[]
-  edges  Edge[]
-  groups Group[]
+  planes   Plane[]
+  sketches Sketch[]
+  points   Point[]
+  edges    Edge[]
+  groups   Group[]
 }
 
-// 사용자가 만든 평면(기준 평면 XY/YZ/XZ 포함, 오프셋 평면도 이 모델로 표현).
-// axis: "XY" | "YZ" | "XZ", offset: 그 축의 법선 방향 이동 거리(기준 평면은 0)
+// 평면. 기준평면(XY/YZ/XZ), 오프셋 평면, 선의 끝점에서 그 선에 수직으로 만든
+// 평면을 모두 origin(mm) + normal(법선, 단위벡터) + uAxis(평면 내 가로 기준
+// 방향, 단위벡터)로 표현한다. vAxis(세로 방향)는 normal × uAxis로 계산한다.
+// 기준평면이 아닌 이상 전역 축에 반드시 정렬되어 있을 필요는 없다.
 model Plane {
   id        String   @id @default(cuid())
   projectId String
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  axis      String
-  offset    Float    @default(0)
+  label     String
+  originX   Float
+  originY   Float
+  originZ   Float
+  normalX   Float
+  normalY   Float
+  normalZ   Float
+  uAxisX    Float
+  uAxisY    Float
+  uAxisZ    Float
   createdAt DateTime @default(now())
 
-  @@unique([projectId, axis, offset])
+  sketches Sketch[]
 }
 
-// 와이어프레임의 점. 그려진 평면과 무관하게 항상 월드 좌표(x,y,z)로 저장한다.
-// 서로 다른 평면 위의 선이라도 같은 좌표의 점을 공유하면 연결된 것으로 본다.
+// 평면 하나에 종속된 스케치(선 그리기) 단위. 트리에서 평면의 자식으로 표시된다.
+model Sketch {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  planeId   String
+  plane     Plane    @relation(fields: [planeId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now())
+
+  points Point[]
+  edges  Edge[]
+}
+
+// 와이어프레임의 점. 항상 월드 좌표(x,y,z, 단위 mm)로 저장한다.
 // 면(Face)은 만들지 않는다 — 점과 선만으로 구조를 표현한다.
 model Point {
   id        String   @id @default(cuid())
   projectId String
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sketchId  String
+  sketch    Sketch   @relation(fields: [sketchId], references: [id], onDelete: Cascade)
   x         Float
   y         Float
   z         Float
@@ -70,6 +96,8 @@ model Edge {
   id        String   @id @default(cuid())
   projectId String
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sketchId  String
+  sketch    Sketch   @relation(fields: [sketchId], references: [id], onDelete: Cascade)
   fromId    String
   from      Point    @relation("EdgeFrom", fields: [fromId], references: [id], onDelete: Cascade)
   toId      String
