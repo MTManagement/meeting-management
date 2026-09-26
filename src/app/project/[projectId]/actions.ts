@@ -23,26 +23,56 @@ const BASE_PLANES = [
 ] as const;
 
 // 프로젝트를 처음 열 때 XY/YZ/XZ 기준 평면이 없으면 만들어둔다.
+// 예전에 XY/XZ 축 이름을 서로 바꾸기 전에 이미 만들어진 프로젝트는
+// 라벨은 "XY"인데 법선은 옛날(XZ) 값 그대로인 채로 DB에 남아있을 수
+// 있어서, 라벨이 같아도 법선/uAxis가 최신 정의와 다르면 고쳐준다.
+// (Point는 절대 mm 좌표를 저장하므로 이미 그려둔 선은 영향받지 않는다.)
 export async function ensureBasePlanes(projectId: string) {
   await assertOwner(projectId);
   const existing = await prisma.plane.findMany({ where: { projectId } });
-  const missing = BASE_PLANES.filter((b) => !existing.some((e) => e.label === b.label));
-  if (missing.length === 0) return;
-  await prisma.plane.createMany({
-    data: missing.map((b) => ({
-      projectId,
-      label: b.label,
-      originX: 0,
-      originY: 0,
-      originZ: 0,
-      normalX: b.normal.x,
-      normalY: b.normal.y,
-      normalZ: b.normal.z,
-      uAxisX: b.uAxis.x,
-      uAxisY: b.uAxis.y,
-      uAxisZ: b.uAxis.z,
-    })),
-  });
+
+  const toCreate = BASE_PLANES.filter((b) => !existing.some((e) => e.label === b.label));
+  if (toCreate.length > 0) {
+    await prisma.plane.createMany({
+      data: toCreate.map((b) => ({
+        projectId,
+        label: b.label,
+        originX: 0,
+        originY: 0,
+        originZ: 0,
+        normalX: b.normal.x,
+        normalY: b.normal.y,
+        normalZ: b.normal.z,
+        uAxisX: b.uAxis.x,
+        uAxisY: b.uAxis.y,
+        uAxisZ: b.uAxis.z,
+      })),
+    });
+  }
+
+  for (const b of BASE_PLANES) {
+    const found = existing.find((e) => e.label === b.label);
+    if (!found) continue;
+    const mismatched =
+      found.normalX !== b.normal.x ||
+      found.normalY !== b.normal.y ||
+      found.normalZ !== b.normal.z ||
+      found.uAxisX !== b.uAxis.x ||
+      found.uAxisY !== b.uAxis.y ||
+      found.uAxisZ !== b.uAxis.z;
+    if (!mismatched) continue;
+    await prisma.plane.update({
+      where: { id: found.id },
+      data: {
+        normalX: b.normal.x,
+        normalY: b.normal.y,
+        normalZ: b.normal.z,
+        uAxisX: b.uAxis.x,
+        uAxisY: b.uAxis.y,
+        uAxisZ: b.uAxis.z,
+      },
+    });
+  }
 }
 
 // XY/YZ/XZ 기준 평면에서 법선 방향으로 offsetMm 만큼 이동한 평행 평면을 만든다.

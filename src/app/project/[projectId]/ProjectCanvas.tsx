@@ -688,10 +688,12 @@ export default function ProjectCanvas({
     snapCameraFlat(plane);
   }
 
-  function exitSketch() {
+  // "나가기"를 누르면 별도 저장 버튼 없이 현재 스케치 상태를 그대로
+  // 저장하면서 나간다. (저장 버튼은 없앴고, 파일 단위 저장은 추후 상단
+  // 메뉴에서 따로 만들 예정)
+  async function exitSketch() {
     if (dirtyRef.current) {
-      const ok = confirm("저장하지 않은 변경사항이 있습니다. 저장하지 않고 나가시겠습니까?");
-      if (!ok) return;
+      await saveCurrentSketch();
     }
     clearActiveGeometry();
     hideDrawPreview();
@@ -1250,6 +1252,9 @@ export default function ProjectCanvas({
     } else if (mode === "sketch" && tool === "pen" && !chainMode) {
       const raw = raycastToActivePlane(e.clientX, e.clientY);
       if (raw) {
+        // 이어그리기가 꺼져 있으면 매번 새로운 독립된 선으로 시작한다 —
+        // 이전 스트로크의 끝점에 자동으로 이어붙지 않도록 체인을 끊는다.
+        lastPointIdRef.current = null;
         strokeActiveRef.current = true;
         strokeRawPointsRef.current = [raw.clone()];
         strokeStraightModeRef.current = straightMode;
@@ -1440,7 +1445,8 @@ export default function ProjectCanvas({
     dirtyRef.current = true;
   }
 
-  async function handleSave() {
+  // 별도 저장 버튼은 없고, 나가기를 누를 때 이 함수로 현재 상태를 저장한다.
+  async function saveCurrentSketch() {
     if (!activeSketchId) return;
     setSaving(true);
     try {
@@ -1449,22 +1455,7 @@ export default function ProjectCanvas({
         fromId: e.fromId,
         toId: e.toId,
       }));
-      const result = await saveSketchGeometry(projectId, activeSketchId, pointsArr, edgesArr);
-
-      clearActiveGeometry();
-      hideDrawPreview();
-      setSelectedPointId(null);
-      setSelectedActiveEdgeId(null);
-      for (const p of result.points) {
-        activePointsRef.current.set(p.id, p);
-        addActivePointMesh(p.id, p);
-      }
-      for (const e of result.edges) {
-        activeEdgesRef.current.set(e.id, e);
-        addActiveEdgeLine(e);
-      }
-      setPointCount(activePointsRef.current.size);
-      setEdgeCount(activeEdgesRef.current.size);
+      await saveSketchGeometry(projectId, activeSketchId, pointsArr, edgesArr);
       setSavedAt(new Date());
       dirtyRef.current = false;
     } finally {
@@ -1645,9 +1636,10 @@ export default function ProjectCanvas({
             <>
               <button
                 onClick={exitSketch}
-                className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
+                disabled={saving}
+                className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600 disabled:opacity-50"
               >
-                ← 나가기
+                {saving ? "저장 중..." : "← 나가기"}
               </button>
               <span className="text-xs text-gray-400 mr-2">
                 {activePlane?.label} ·{" "}
@@ -1761,12 +1753,14 @@ export default function ProjectCanvas({
                 </div>
               )}
 
-              <button
-                onClick={handleNewStroke}
-                className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
-              >
-                새 선 시작
-              </button>
+              {chainMode && (
+                <button
+                  onClick={handleNewStroke}
+                  className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
+                >
+                  새 선 시작
+                </button>
+              )}
               <button
                 onClick={handleUndo}
                 className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
@@ -1789,13 +1783,6 @@ export default function ProjectCanvas({
                 className="text-xs px-2.5 py-1.5 rounded-md border border-red-200 bg-white text-red-500"
               >
                 스케치 삭제
-              </button>
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                className="ml-auto text-xs px-3 py-1.5 rounded-md bg-gray-900 text-white disabled:opacity-50"
-              >
-                {saving ? "저장 중..." : "저장"}
               </button>
             </>
           )}
