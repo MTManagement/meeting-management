@@ -86,7 +86,7 @@ function fromLocalUV(plane: PlaneData, u: number, v: number): THREE.Vector3 {
   return origin.clone().add(uAxis.clone().multiplyScalar(u)).add(vAxis.clone().multiplyScalar(v));
 }
 
-const ORTHO_SNAP_DEG = 5;
+const ORTHO_SNAP_DEG = 8; // 터치로는 5도가 너무 빡빡해서 조금 넉넉하게
 
 // 기준점(ref)에서 목표점까지의 방향이 수평·수직에서 ORTHO_SNAP_DEG 이내면
 // 그쪽으로 딱 맞춘다 ("마그네틱" 느낌의 직교 스냅).
@@ -836,7 +836,14 @@ export default function ProjectCanvas({
   function handleDrawClick(clientX: number, clientY: number) {
     const raw = raycastToActivePlane(clientX, clientY);
     if (!raw) return;
-    commitDrawPoint(applyOrthoSnap(applySnap(raw)));
+    // 격자·직교 스냅보다 "근처 기존 점에 물리는 것"을 항상 우선한다.
+    // 그렇지 않으면 도형을 닫으려고 첫 점 근처를 찍었을 때 마그네틱
+    // 스냅이 커서를 다른 방향으로 틀어버려서 정확히 안 물릴 수 있다.
+    const nearbyId = findNearbyActivePoint(raw);
+    const target = nearbyId
+      ? vecMm(activePointsRef.current.get(nearbyId)!)
+      : applyOrthoSnap(applySnap(raw));
+    commitDrawPoint(target);
   }
 
   // ── 그리는 중 고무줄(rubber-band) 미리보기 선 + 실시간 치수 라벨 ──
@@ -854,7 +861,10 @@ export default function ProjectCanvas({
       hideDrawPreview();
       return;
     }
-    const snappedRaw = applyOrthoSnap(applySnap(raw));
+    const nearbyId = findNearbyActivePoint(raw);
+    const snappedRaw = nearbyId
+      ? vecMm(activePointsRef.current.get(nearbyId)!)
+      : applyOrthoSnap(applySnap(raw));
     const fromVec = vecMm(from);
 
     let dir = snappedRaw.clone().sub(fromVec);
