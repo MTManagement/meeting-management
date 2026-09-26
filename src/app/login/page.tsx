@@ -1,8 +1,15 @@
+import { redirect } from "next/navigation";
+import { getCurrentUser } from "@/lib/auth";
 import { guestLogin } from "./actions";
 
-export default function LoginPage() {
+export const dynamic = "force-dynamic";
+
+export default async function LoginPage() {
+  const user = await getCurrentUser();
+  if (user) redirect("/home");
+
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-200 px-4">
+    <div className="min-h-screen flex items-center justify-center bg-[#faf6ee] px-4">
       <div className="w-full max-w-sm rounded-lg border border-gray-200 bg-white p-6">
         <h1 className="text-xl font-bold mb-1">PaperSketch</h1>
         <p className="text-sm text-gray-500 mb-6">
