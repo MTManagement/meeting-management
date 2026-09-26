@@ -68,6 +68,20 @@ function toThreePlane(plane: PlaneData): THREE.Plane {
   return new THREE.Plane(normal, -normal.dot(origin));
 }
 
+const TAP_MAX_MOVE = 8; // px
+const TAP_MAX_MS = 500;
+
+// 컴포넌트 스코프 밖의 평범한 함수로 둬야 eslint(react-hooks/purity)가
+// Date.now() 호출을 "렌더 중 impure 호출"로 오인하지 않는다.
+function isTap(down: { x: number; y: number; time: number }, up: { x: number; y: number }) {
+  const dist = Math.hypot(up.x - down.x, up.y - down.y);
+  const elapsedMs = Date.now() - down.time;
+  return dist <= TAP_MAX_MOVE && elapsedMs <= TAP_MAX_MS;
+}
+function nowMs() {
+  return Date.now();
+}
+
 export default function ProjectCanvas({
   projectId,
   projectName,
@@ -548,7 +562,22 @@ export default function ProjectCanvas({
     lastPointIdRef.current = pointId;
   }
 
-  function handleCanvasClick(e: React.MouseEvent) {
+  // OrbitControls는 터치 시작 시 제스처 종류와 무관하게 항상
+  // preventDefault()를 호출해서, 브라우저가 탭을 click 이벤트로
+  // 합성하는 걸 막아버린다. 그래서 click에 의존하지 않고
+  // pointerdown/pointerup을 직접 비교해서 "탭/클릭인지"를 판단한다.
+  const pointerDownRef = useRef<{ x: number; y: number; time: number } | null>(null);
+
+  function handlePointerDown(e: React.PointerEvent) {
+    pointerDownRef.current = { x: e.clientX, y: e.clientY, time: nowMs() };
+  }
+
+  function handlePointerUp(e: React.PointerEvent) {
+    const down = pointerDownRef.current;
+    pointerDownRef.current = null;
+    if (!down) return;
+    if (!isTap(down, { x: e.clientX, y: e.clientY })) return; // 드래그(회전)로 판단, 무시
+
     if (mode === "sketch") {
       if (drawing) handleDrawClick(e.clientX, e.clientY);
       return;
@@ -556,7 +585,7 @@ export default function ProjectCanvas({
     handleOverviewClick(e.clientX, e.clientY);
   }
 
-  function handleCanvasMove(e: React.MouseEvent) {
+  function handleCanvasMove(e: React.PointerEvent) {
     if (mode !== "sketch" || !drawing) return;
     const target = raycastToActivePlane(e.clientX, e.clientY);
     if (!target) return;
@@ -887,8 +916,10 @@ export default function ProjectCanvas({
         <div
           ref={mountRef}
           className="flex-1"
-          onClick={handleCanvasClick}
-          onMouseMove={handleCanvasMove}
+          style={{ touchAction: "none" }}
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
+          onPointerMove={handleCanvasMove}
         />
       </div>
     </div>
