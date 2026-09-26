@@ -138,6 +138,20 @@ export default function ProjectCanvas({
 
   const activePlane = planes.find((p) => p.id === activePlaneId) ?? null;
 
+  // 아이패드 사파리에서 100vh는 주소창이 보였다 사라졌다 할 때 불안정해서
+  // 페이지 자체가 스크롤되며 상단 툴바가 화면 밖으로 밀려 올라가 버린다.
+  // body 스크롤을 잠그고, 아래 루트를 fixed inset-0으로 고정해서 막는다.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    const prevOverscroll = document.body.style.overscrollBehavior;
+    document.body.style.overflow = "hidden";
+    document.body.style.overscrollBehavior = "none";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.body.style.overscrollBehavior = prevOverscroll;
+    };
+  }, []);
+
   // ── Three.js 씬 초기화 ─────────────────────────────────────────
   useEffect(() => {
     const mount = mountRef.current;
@@ -663,7 +677,7 @@ export default function ProjectCanvas({
   const selectedPlane = planes.find((p) => p.id === selectedPlaneId) ?? null;
 
   return (
-    <div className="relative h-screen w-full bg-[#faf6ee] overflow-hidden">
+    <div className="fixed inset-0 bg-[#faf6ee] overflow-hidden">
       {/* 좌측 트리 (캔버스 위에 떠 있는 패널, 레이아웃을 나누지 않음) */}
       <div className="absolute top-[4.75rem] left-3 z-10 w-64 max-h-[calc(100vh-5.5rem)] flex flex-col rounded-lg border border-black/10 bg-white/90 backdrop-blur-sm shadow-lg">
         <div className="px-3 py-3 border-b border-black/10">
