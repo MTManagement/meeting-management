@@ -14,10 +14,12 @@ async function assertOwner(projectId: string) {
   return project;
 }
 
+// Z축을 상하(수직) 방향으로 쓰기로 해서, 기존 XZ 평면(법선 Y, 수직인
+// 벽면)을 XY로, 기존 XY 평면(법선 Z, 바닥면)을 XZ로 이름을 서로 바꿨다.
 const BASE_PLANES = [
-  { label: "XY", normal: { x: 0, y: 0, z: 1 }, uAxis: { x: 1, y: 0, z: 0 } },
+  { label: "XY", normal: { x: 0, y: 1, z: 0 }, uAxis: { x: 1, y: 0, z: 0 } },
   { label: "YZ", normal: { x: 1, y: 0, z: 0 }, uAxis: { x: 0, y: 1, z: 0 } },
-  { label: "XZ", normal: { x: 0, y: 1, z: 0 }, uAxis: { x: 1, y: 0, z: 0 } },
+  { label: "XZ", normal: { x: 0, y: 0, z: 1 }, uAxis: { x: 1, y: 0, z: 0 } },
 ] as const;
 
 // 프로젝트를 처음 열 때 XY/YZ/XZ 기준 평면이 없으면 만들어둔다.

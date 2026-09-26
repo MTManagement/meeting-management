@@ -221,6 +221,9 @@ export default function ProjectCanvas({
   const previewLineRef = useRef<THREE.Line | null>(null);
   const previewLabelRef = useRef<CSS2DObject | null>(null);
   const draggingPointIdRef = useRef<string | null>(null);
+  const lastMouseClientRef = useRef<{ x: number; y: number } | null>(null);
+  const lastPreviewDirRef = useRef<THREE.Vector3 | null>(null);
+  const typedLengthRef = useRef<string>("");
 
   const [mode, setMode] = useState<"overview" | "sketch">("overview");
   const [activePlaneId, setActivePlaneId] = useState<string | null>(null);
@@ -255,6 +258,9 @@ export default function ProjectCanvas({
   const [snapEnabled, setSnapEnabled] = useState(false);
   const [snapSizeInput, setSnapSizeInput] = useState("50");
 
+  // 그리는 중 키보드로 입력한 치수(숫자). 상태바 표시용이고 실제 값은 ref에 있다.
+  const [typedLength, setTypedLength] = useState("");
+
   const activePlane = planes.find((p) => p.id === activePlaneId) ?? null;
 
   // 아이패드 사파리에서 100vh는 주소창이 보였다 사라졌다 할 때 불안정해서
@@ -286,7 +292,8 @@ export default function ProjectCanvas({
       0.1,
       1000
     );
-    camera.position.set(6, 5, 8);
+    camera.position.set(6, 8, 5);
+    camera.up.set(0, 0, 1); // Z축을 상하(수직) 방향으로 사용
     cameraRef.current = camera;
 
     mount.style.position = "relative";
@@ -782,11 +789,9 @@ export default function ProjectCanvas({
     return best;
   }
 
-  function handleDrawClick(clientX: number, clientY: number) {
-    const raw = raycastToActivePlane(clientX, clientY);
-    if (!raw) return;
-    const target = applyOrthoSnap(applySnap(raw));
-
+  // 점 하나를 찍고(가까운 점 있으면 그 점 사용), 이전 점이 있으면 선까지 잇는다.
+  // 마우스 클릭과 키보드 치수 입력(Enter) 양쪽에서 공용으로 쓴다.
+  function commitDrawPoint(target: THREE.Vector3) {
     let pointId = findNearbyActivePoint(target);
     if (!pointId) {
       pointId = `tmp_${crypto.randomUUID()}`;
@@ -812,20 +817,49 @@ export default function ProjectCanvas({
       dirtyRef.current = true;
     }
     lastPointIdRef.current = pointId;
+    clearTypedLength();
+  }
+
+  function handleDrawClick(clientX: number, clientY: number) {
+    const raw = raycastToActivePlane(clientX, clientY);
+    if (!raw) return;
+    commitDrawPoint(applyOrthoSnap(applySnap(raw)));
   }
 
   // ── 그리는 중 고무줄(rubber-band) 미리보기 선 + 실시간 치수 라벨 ──
-  function updateDrawPreview(clientX: number, clientY: number) {
+  // 커서 이동뿐 아니라 키보드로 숫자를 입력했을 때도 다시 그려야 하므로
+  // clientX/clientY를 생략하면 마지막으로 기억해둔 마우스 위치를 쓴다.
+  function updateDrawPreview(clientX?: number, clientY?: number) {
+    if (clientX !== undefined && clientY !== undefined) {
+      lastMouseClientRef.current = { x: clientX, y: clientY };
+    }
+    const mouse = lastMouseClientRef.current;
     const last = lastPointIdRef.current;
     const from = last ? activePointsRef.current.get(last) : null;
-    const raw = raycastToActivePlane(clientX, clientY);
+    const raw = mouse ? raycastToActivePlane(mouse.x, mouse.y) : null;
     if (!from || !raw) {
       hideDrawPreview();
       return;
     }
-    const target = applyOrthoSnap(applySnap(raw));
-
+    const snappedRaw = applyOrthoSnap(applySnap(raw));
     const fromVec = vecMm(from);
+
+    let dir = snappedRaw.clone().sub(fromVec);
+    if (dir.length() > 1e-6) {
+      dir.normalize();
+      lastPreviewDirRef.current = dir.clone();
+    } else if (lastPreviewDirRef.current) {
+      dir = lastPreviewDirRef.current.clone();
+    } else {
+      dir = new THREE.Vector3(1, 0, 0);
+    }
+
+    const typed = parseFloat(typedLengthRef.current);
+    const hasTyped = typedLengthRef.current.length > 0 && !Number.isNaN(typed) && typed > 0;
+    const target = hasTyped
+      ? fromVec.clone().add(dir.multiplyScalar(mmToScene(typed)))
+      : snappedRaw;
+
     if (!previewLineRef.current) {
       const geo = new THREE.BufferGeometry().setFromPoints([fromVec, target]);
       const mat = new THREE.LineDashedMaterial({
@@ -845,18 +879,22 @@ export default function ProjectCanvas({
     }
     previewLineRef.current.computeLineDistances();
 
-    const lengthMm = distanceMm(
-      { x: from.x, y: from.y, z: from.z },
-      { x: sceneToMm(target.x), y: sceneToMm(target.y), z: sceneToMm(target.z) }
-    );
+    const lengthMm = hasTyped
+      ? Math.round(typed)
+      : distanceMm(
+          { x: from.x, y: from.y, z: from.z },
+          { x: sceneToMm(target.x), y: sceneToMm(target.y), z: sceneToMm(target.z) }
+        );
     const mid = fromVec.clone().add(target).multiplyScalar(0.5);
     if (!previewLabelRef.current) {
-      const label = new CSS2DObject(createLabelDiv(`${lengthMm}mm`));
+      const label = new CSS2DObject(createLabelDiv(""));
       previewGroupRef.current?.add(label);
       previewLabelRef.current = label;
     }
     previewLabelRef.current.position.copy(mid);
-    previewLabelRef.current.element.textContent = `${lengthMm}mm`;
+    previewLabelRef.current.element.textContent = hasTyped
+      ? `${lengthMm}mm ▎키보드 입력 중 (Enter)`
+      : `${lengthMm}mm`;
   }
   function hideDrawPreview() {
     if (previewLineRef.current) {
@@ -868,6 +906,36 @@ export default function ProjectCanvas({
     if (previewLabelRef.current) {
       previewGroupRef.current?.remove(previewLabelRef.current);
       previewLabelRef.current = null;
+    }
+    lastPreviewDirRef.current = null;
+    clearTypedLength();
+  }
+
+  // ── 키보드로 치수 직접 입력 (그리는 중, 숫자 입력 후 Enter) ──────
+  function clearTypedLength() {
+    typedLengthRef.current = "";
+    setTypedLength("");
+  }
+  function handleDrawKeyDown(e: KeyboardEvent) {
+    if (mode !== "sketch" || tool !== "pen" || !lastPointIdRef.current) return;
+    if (/^[0-9.]$/.test(e.key)) {
+      typedLengthRef.current += e.key;
+      setTypedLength(typedLengthRef.current);
+      updateDrawPreview();
+    } else if (e.key === "Backspace") {
+      typedLengthRef.current = typedLengthRef.current.slice(0, -1);
+      setTypedLength(typedLengthRef.current);
+      updateDrawPreview();
+    } else if (e.key === "Enter") {
+      const value = parseFloat(typedLengthRef.current);
+      const last = lastPointIdRef.current;
+      const from = last ? activePointsRef.current.get(last) : null;
+      const dir = lastPreviewDirRef.current;
+      if (from && dir && !Number.isNaN(value) && value > 0) {
+        const target = vecMm(from).add(dir.clone().multiplyScalar(mmToScene(value)));
+        commitDrawPoint(target);
+        updateDrawPreview();
+      }
     }
   }
 
@@ -896,11 +964,29 @@ export default function ProjectCanvas({
     return fromLocalUV(activePlane, snappedUV.u, snappedUV.v);
   }
 
+  // 점을 옮길 때, 그 점과 연결된 이웃 점들 기준으로도 수평·수직이면
+  // 마그네틱 스냅을 건다 (연결된 선이 여러 개면 순서대로 적용).
+  function applyOrthoSnapForPoint(pointId: string, target: THREE.Vector3): THREE.Vector3 {
+    if (!activePlane) return target;
+    let result = target;
+    for (const e of activeEdgesRef.current.values()) {
+      const neighborId = e.fromId === pointId ? e.toId : e.toId === pointId ? e.fromId : null;
+      if (!neighborId) continue;
+      const neighbor = activePointsRef.current.get(neighborId);
+      if (!neighbor) continue;
+      const refUV = toLocalUV(activePlane, vecMm(neighbor));
+      const targetUV = toLocalUV(activePlane, result);
+      const snappedUV = orthoSnapLocal(refUV, targetUV);
+      result = fromLocalUV(activePlane, snappedUV.u, snappedUV.v);
+    }
+    return result;
+  }
+
   // ── 점 이동(드래그) ──────────────────────────────────────────────
   function movePointTo(pointId: string, targetRaw: THREE.Vector3) {
     const rec = activePointsRef.current.get(pointId);
     if (!rec) return;
-    const target = applySnap(targetRaw);
+    const target = applyOrthoSnapForPoint(pointId, applySnap(targetRaw));
     rec.x = sceneToMm(target.x);
     rec.y = sceneToMm(target.y);
     rec.z = sceneToMm(target.z);
@@ -1065,15 +1151,22 @@ export default function ProjectCanvas({
   }
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key !== "Escape") return;
+      // 치수 라벨 편집창 등 다른 입력창에 타이핑 중이면 관여하지 않는다.
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
       if (mode !== "sketch") return;
-      handleNewStroke();
-      selectActivePoint(null);
+
+      if (e.key === "Escape") {
+        handleNewStroke();
+        selectActivePoint(null);
+        return;
+      }
+      handleDrawKeyDown(e);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode]);
+  }, [mode, tool]);
 
   function handleUndo() {
     const last = lastPointIdRef.current;
@@ -1444,6 +1537,11 @@ export default function ProjectCanvas({
               )}
               {tool === "move" && (
                 <span>점을 눌러서 이동하거나 탭해서 선택, 선을 탭해서 선택하세요.</span>
+              )}
+              {tool === "pen" && typedLength && (
+                <span className="text-gray-600">
+                  숫자 입력 중: {typedLength}mm (Enter로 확정, Esc로 취소)
+                </span>
               )}
               {savedAt && <span>마지막 저장: {savedAt.toLocaleTimeString("ko-KR")}</span>}
             </>
