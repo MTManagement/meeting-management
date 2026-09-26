@@ -858,7 +858,9 @@ export default function ProjectCanvas({
   // 마우스 클릭과 키보드 치수 입력(Enter) 양쪽에서 공용으로 쓴다.
   // showLabel=false면 치수 라벨을 안 붙인다 (자유곡선을 잘게 쪼갠 구간용 —
   // 30mm 단위 조각마다 치수가 다 뜨면 지저분하므로, 진짜 직선을 그을 때만 보여준다).
-  function commitDrawPoint(target: THREE.Vector3, showLabel = true) {
+  // showPoint=false면 점(구슬) 표시를 안 한다 (자유곡선 중간 보간점용 —
+  // 궤적을 부드럽게 유지하기 위한 점일 뿐, 실제 꼭짓점처럼 보이면 안 되므로).
+  function commitDrawPoint(target: THREE.Vector3, showLabel = true, showPoint = true) {
     let pointId = findNearbyActivePoint(target);
     if (!pointId) {
       pointId = `tmp_${crypto.randomUUID()}`;
@@ -869,7 +871,7 @@ export default function ProjectCanvas({
         z: sceneToMm(target.z),
       };
       activePointsRef.current.set(pointId, rec);
-      addActivePointMesh(pointId, rec);
+      if (showPoint) addActivePointMesh(pointId, rec);
       setPointCount(activePointsRef.current.size);
       dirtyRef.current = true;
     }
@@ -890,21 +892,27 @@ export default function ProjectCanvas({
   // 격자·직교 스냅보다 "근처 기존 점에 물리는 것"을 항상 우선한다.
   // 그렇지 않으면 도형을 닫으려고 첫 점 근처를 찍었을 때 마그네틱
   // 스냅이 커서를 다른 방향으로 틀어버려서 정확히 안 물릴 수 있다.
-  function commitDrawPointFromRaw(raw: THREE.Vector3, snap = true, showLabel = true) {
+  function commitDrawPointFromRaw(
+    raw: THREE.Vector3,
+    snap = true,
+    showLabel = true,
+    showPoint = true
+  ) {
     const nearbyId = findNearbyActivePoint(raw);
     const target = nearbyId
       ? vecMm(activePointsRef.current.get(nearbyId)!)
       : snap
         ? applyOrthoSnap(applySnap(raw))
         : raw;
-    commitDrawPoint(target, showLabel);
+    commitDrawPoint(target, showLabel, showPoint);
   }
 
   // 자유곡선 그대로 그린 궤적을 여러 짧은 직선(점 여러 개)으로 커밋한다.
   // 궤적의 모든 점을 다 쓰면 너무 촘촘하므로 일정 거리 이상 떨어진
   // 점만 남기고, 중간 점들은 스냅을 걸지 않아 손그림 느낌을 유지한다.
   // 조각마다 치수 라벨이 뜨면 지저분하니 자유곡선 구간에는 라벨을 안 붙인다
-  // (치수는 실제로 "직선으로" 그은 선에만 표시된다).
+  // (치수는 실제로 "직선으로" 그은 선에만 표시된다). 마찬가지로 중간 보간점은
+  // 점 표시도 하지 않고, 스트로크의 시작/끝점만 점으로 보여준다.
   const FREEHAND_MIN_DIST = 0.03; // scene 단위 ≈ 30mm
   function commitFreehandStroke(rawPoints: THREE.Vector3[]) {
     if (rawPoints.length === 0) return;
@@ -916,7 +924,10 @@ export default function ProjectCanvas({
     }
     const last = rawPoints[rawPoints.length - 1];
     if (simplified[simplified.length - 1] !== last) simplified.push(last);
-    for (const p of simplified) commitDrawPointFromRaw(p, false, false);
+    simplified.forEach((p, i) => {
+      const isEndpoint = i === 0 || i === simplified.length - 1;
+      commitDrawPointFromRaw(p, false, false, isEndpoint);
+    });
   }
 
   function handleDrawClick(clientX: number, clientY: number) {
