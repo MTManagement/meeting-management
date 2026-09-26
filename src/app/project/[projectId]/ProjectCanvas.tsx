@@ -73,6 +73,36 @@ function toThreePlane(plane: PlaneData): THREE.Plane {
   return new THREE.Plane(normal, -normal.dot(origin));
 }
 
+// 평면 자신의 가로(uAxis)·세로(vAxis) 기준 2D 좌표로 변환/역변환.
+// "수평·수직" 마그네틱 스냅은 전역 XYZ가 아니라 이 평면 기준으로 판단해야
+// 기울어진(수직 평면에서 파생된) 평면에서도 자연스럽다.
+function toLocalUV(plane: PlaneData, worldScene: THREE.Vector3): { u: number; v: number } {
+  const { origin, uAxis, vAxis } = planeBasis(plane);
+  const rel = worldScene.clone().sub(origin);
+  return { u: rel.dot(uAxis), v: rel.dot(vAxis) };
+}
+function fromLocalUV(plane: PlaneData, u: number, v: number): THREE.Vector3 {
+  const { origin, uAxis, vAxis } = planeBasis(plane);
+  return origin.clone().add(uAxis.clone().multiplyScalar(u)).add(vAxis.clone().multiplyScalar(v));
+}
+
+const ORTHO_SNAP_DEG = 5;
+
+// 기준점(ref)에서 목표점까지의 방향이 수평·수직에서 ORTHO_SNAP_DEG 이내면
+// 그쪽으로 딱 맞춘다 ("마그네틱" 느낌의 직교 스냅).
+function orthoSnapLocal(
+  ref: { u: number; v: number },
+  target: { u: number; v: number }
+): { u: number; v: number } {
+  const du = target.u - ref.u;
+  const dv = target.v - ref.v;
+  if (Math.hypot(du, dv) < 1e-6) return target;
+  const angleDeg = Math.atan2(Math.abs(dv), Math.abs(du)) * (180 / Math.PI);
+  if (angleDeg < ORTHO_SNAP_DEG) return { u: target.u, v: ref.v }; // 수평
+  if (angleDeg > 90 - ORTHO_SNAP_DEG) return { u: ref.u, v: target.v }; // 수직
+  return target;
+}
+
 function distanceMm(a: Vec3, b: Vec3) {
   return Math.round(Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z));
 }
@@ -578,7 +608,9 @@ export default function ProjectCanvas({
   }
 
   // ── 스케치 진입/이탈 ────────────────────────────────────────────
-  function enterSketch(plane: PlaneData, sketch: SketchData) {
+  // 기존 스케치를 열 때는 "수정" 상태로 시작하고(실수로 선이 이어지지
+  // 않게), 방금 만든 빈 스케치는 바로 그릴 수 있게 "그리기" 상태로 연다.
+  function enterSketch(plane: PlaneData, sketch: SketchData, startTool: "pen" | "move" = "move") {
     clearActiveGeometry();
     for (const p of sketch.points) activePointsRef.current.set(p.id, p);
     for (const e of sketch.edges) activeEdgesRef.current.set(e.id, e);
@@ -591,7 +623,7 @@ export default function ProjectCanvas({
     setActivePlaneId(plane.id);
     setActiveSketchId(sketch.id);
     setMode("sketch");
-    setTool("pen");
+    setTool(startTool);
     setSelectedPlaneId(null);
     setSelectedEdge(null);
     setPendingPerpEdge(null);
@@ -620,7 +652,7 @@ export default function ProjectCanvas({
     setBusy(true);
     try {
       const sketch = await createSketch(projectId, plane.id);
-      enterSketch(plane, { id: sketch.id, name: sketch.name, points: [], edges: [] });
+      enterSketch(plane, { id: sketch.id, name: sketch.name, points: [], edges: [] }, "pen");
       router.refresh();
     } finally {
       setBusy(false);
@@ -753,7 +785,7 @@ export default function ProjectCanvas({
   function handleDrawClick(clientX: number, clientY: number) {
     const raw = raycastToActivePlane(clientX, clientY);
     if (!raw) return;
-    const target = applySnap(raw);
+    const target = applyOrthoSnap(applySnap(raw));
 
     let pointId = findNearbyActivePoint(target);
     if (!pointId) {
@@ -786,11 +818,12 @@ export default function ProjectCanvas({
   function updateDrawPreview(clientX: number, clientY: number) {
     const last = lastPointIdRef.current;
     const from = last ? activePointsRef.current.get(last) : null;
-    const target = raycastToActivePlane(clientX, clientY);
-    if (!from || !target) {
+    const raw = raycastToActivePlane(clientX, clientY);
+    if (!from || !raw) {
       hideDrawPreview();
       return;
     }
+    const target = applyOrthoSnap(applySnap(raw));
 
     const fromVec = vecMm(from);
     if (!previewLineRef.current) {
@@ -848,6 +881,19 @@ export default function ProjectCanvas({
       mmToScene(snapMm(sceneToMm(target.y), size)),
       mmToScene(snapMm(sceneToMm(target.z), size))
     );
+  }
+
+  // 선을 그을 때 마지막 점(없으면 평면 원점) 기준으로 수평·수직에
+  // 가까우면 딱 맞춰주는 마그네틱 스냅.
+  function applyOrthoSnap(target: THREE.Vector3): THREE.Vector3 {
+    if (!activePlane) return target;
+    const last = lastPointIdRef.current
+      ? activePointsRef.current.get(lastPointIdRef.current)
+      : null;
+    const refUV = last ? toLocalUV(activePlane, vecMm(last)) : { u: 0, v: 0 };
+    const targetUV = toLocalUV(activePlane, target);
+    const snappedUV = orthoSnapLocal(refUV, targetUV);
+    return fromLocalUV(activePlane, snappedUV.u, snappedUV.v);
   }
 
   // ── 점 이동(드래그) ──────────────────────────────────────────────
@@ -992,8 +1038,9 @@ export default function ProjectCanvas({
     }
 
     if (tool !== "pen") return;
-    const target = raycastToActivePlane(e.clientX, e.clientY);
-    if (!target) return;
+    const raw = raycastToActivePlane(e.clientX, e.clientY);
+    if (!raw) return;
+    const target = applyOrthoSnap(applySnap(raw));
     setCursorMm({ x: sceneToMm(target.x), y: sceneToMm(target.y), z: sceneToMm(target.z) });
     if (lastPointIdRef.current) updateDrawPreview(e.clientX, e.clientY);
   }
@@ -1275,24 +1322,19 @@ export default function ProjectCanvas({
                   .find((s) => s.id === activeSketchId)?.name}
               </span>
               <button
-                onClick={() => handleSetTool("pen")}
+                onClick={() => handleSetTool(tool === "pen" ? "move" : "pen")}
                 className={`text-xs px-2.5 py-1.5 rounded-md border ${
                   tool === "pen"
                     ? "bg-gray-900 text-white border-gray-900"
                     : "bg-white text-gray-600 border-gray-300"
                 }`}
+                title={
+                  tool === "pen"
+                    ? "끄면 그린 점·선을 수정할 수 있어요"
+                    : "켜면 이어서 선을 그릴 수 있어요"
+                }
               >
-                ✎ 그리기
-              </button>
-              <button
-                onClick={() => handleSetTool("move")}
-                className={`text-xs px-2.5 py-1.5 rounded-md border ${
-                  tool === "move"
-                    ? "bg-gray-900 text-white border-gray-900"
-                    : "bg-white text-gray-600 border-gray-300"
-                }`}
-              >
-                ✥ 점 이동
+                {tool === "pen" ? "✎ 그리는 중" : "✥ 수정 중 (그리기 켜기)"}
               </button>
 
               <label className="flex items-center gap-1 text-xs text-gray-500 px-1">
