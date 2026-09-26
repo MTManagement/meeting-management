@@ -31,6 +31,7 @@ const PENCIL = 0x4b4b4b;
 const PENCIL_DIM = 0xcfc7b8;
 const PLANE_CARD = 0x9a9284;
 const PLANE_CARD_ACTIVE = 0x4b4b4b;
+const SELECT_COLOR = 0xc2410c; // 선택된 선/끝점 강조색 (주황)
 const CARD_SIZE = 1.2; // scene 단위 (=1200mm)
 const GRID_SIZE = 10; // scene 단위 (=10m)
 const FLAT_DISTANCE = 8; // 스케치 정면 뷰 카메라 거리 (scene 단위)
@@ -119,6 +120,7 @@ export default function ProjectCanvas({
 
   const [selectedPlaneId, setSelectedPlaneId] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<{
+    edgeId: string;
     sketchId: string;
     from: PointRec;
     to: PointRec;
@@ -272,27 +274,49 @@ export default function ProjectCanvas({
       for (const sketch of plane.sketches) {
         if (mode === "sketch" && sketch.id === activeSketchId) continue; // 활성 스케치는 별도 그룹에서 그림
         const pointById = new Map(sketch.points.map((p) => [p.id, p]));
+        const highlightedPointIds = new Set<string>();
+
         for (const e of sketch.edges) {
           const from = pointById.get(e.fromId);
           const to = pointById.get(e.toId);
           if (!from || !to) continue;
+          const isSelectedEdge = selectedEdge?.edgeId === e.id;
+          if (isSelectedEdge) {
+            highlightedPointIds.add(from.id);
+            highlightedPointIds.add(to.id);
+          }
           const geo = new THREE.BufferGeometry().setFromPoints([
             vecMm(from),
             vecMm(to),
           ]);
-          const mat = new THREE.LineBasicMaterial({ color: PENCIL_DIM });
+          const mat = new THREE.LineBasicMaterial({
+            color: isSelectedEdge ? SELECT_COLOR : PENCIL_DIM,
+            linewidth: isSelectedEdge ? 3 : 1,
+          });
           const line = new THREE.Line(geo, mat);
           line.userData = {
             kind: "edge",
+            edgeId: e.id,
             sketchId: sketch.id,
             from,
             to,
           };
           refGroup.add(line);
         }
+
+        for (const p of sketch.points) {
+          const isHighlighted = highlightedPointIds.has(p.id);
+          const geo = new THREE.SphereGeometry(isHighlighted ? 0.09 : 0.045, 12, 12);
+          const mat = new THREE.MeshBasicMaterial({
+            color: isHighlighted ? SELECT_COLOR : PENCIL_DIM,
+          });
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.position.copy(vecMm(p));
+          refGroup.add(mesh);
+        }
       }
     }
-  }, [planes, activePlaneId, activeSketchId, mode, selectedPlaneId]);
+  }, [planes, activePlaneId, activeSketchId, mode, selectedPlaneId, selectedEdge]);
 
   // ── 활성 스케치용 점/선 메시 헬퍼 ──────────────────────────────
   function addActivePointMesh(id: string, p: PointRec) {
@@ -504,6 +528,7 @@ export default function ProjectCanvas({
       setSelectedEdge(null);
     } else if (obj.userData.kind === "edge") {
       setSelectedEdge({
+        edgeId: obj.userData.edgeId,
         sketchId: obj.userData.sketchId,
         from: obj.userData.from,
         to: obj.userData.to,
