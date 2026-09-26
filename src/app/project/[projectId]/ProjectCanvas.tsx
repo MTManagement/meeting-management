@@ -261,6 +261,9 @@ export default function ProjectCanvas({
   // 그리는 중 키보드로 입력한 치수(숫자). 상태바 표시용이고 실제 값은 ref에 있다.
   const [typedLength, setTypedLength] = useState("");
 
+  // 트리에서 접어둔 평면 id들 (CATIA 스타일 펼치기/접기)
+  const [collapsedPlaneIds, setCollapsedPlaneIds] = useState<Set<string>>(new Set());
+
   const activePlane = planes.find((p) => p.id === activePlaneId) ?? null;
 
   // 아이패드 사파리에서 100vh는 주소창이 보였다 사라졌다 할 때 불안정해서
@@ -655,6 +658,15 @@ export default function ProjectCanvas({
     router.refresh();
   }
 
+  function togglePlaneCollapsed(planeId: string) {
+    setCollapsedPlaneIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(planeId)) next.delete(planeId);
+      else next.add(planeId);
+      return next;
+    });
+  }
+
   async function handleCreateSketch(plane: PlaneData) {
     setBusy(true);
     try {
@@ -709,6 +721,7 @@ export default function ProjectCanvas({
       await createPerpendicularPlane(projectId, point, direction);
       setPendingPerpEdge(null);
       setSelectedEdge(null);
+      setSelectedActiveEdgeId(null);
       router.refresh();
     } finally {
       setBusy(false);
@@ -1240,64 +1253,84 @@ export default function ProjectCanvas({
         <div className="px-3 py-3 border-b border-black/10">
           <p className="text-sm font-bold text-gray-900 truncate">{projectName}</p>
         </div>
-        <div className="flex-1 overflow-y-auto px-2 py-2 text-xs">
-          {planes.map((plane) => (
-            <div key={plane.id} className="mb-1">
-              <button
-                onClick={() => {
-                  setSelectedPlaneId(plane.id);
-                  setSelectedEdge(null);
-                }}
-                className={`w-full flex items-center justify-between px-2 py-1.5 rounded-md text-left ${
-                  plane.id === (mode === "sketch" ? activePlaneId : selectedPlaneId)
-                    ? "bg-gray-900 text-white"
-                    : "text-gray-700 hover:bg-black/5"
-                }`}
-              >
-                <span>▢ {plane.label}</span>
-                <span
-                  role="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (!busy) handleCreateSketch(plane);
-                  }}
-                  className="text-[10px] opacity-70 hover:opacity-100 px-1"
-                  title="새 스케치 만들기"
-                >
-                  +
-                </span>
-              </button>
-              {plane.sketches.map((sketch) => (
+        <div className="flex-1 overflow-y-auto px-1.5 py-2 text-xs">
+          {planes.map((plane) => {
+            const isCollapsed = collapsedPlaneIds.has(plane.id);
+            const isPlaneActive = plane.id === (mode === "sketch" ? activePlaneId : selectedPlaneId);
+            const hasChildren = plane.sketches.length > 0;
+            return (
+              <div key={plane.id}>
                 <div
-                  key={sketch.id}
-                  className={`w-full flex items-center justify-between rounded-md ${
-                    sketch.id === activeSketchId
-                      ? "bg-gray-900/90 text-white"
-                      : "text-gray-500 hover:bg-black/5"
+                  onClick={() => {
+                    setSelectedPlaneId(plane.id);
+                    setSelectedEdge(null);
+                  }}
+                  className={`group w-full flex items-center gap-1 pr-1 py-1 rounded-md cursor-pointer ${
+                    isPlaneActive ? "bg-gray-900 text-white" : "text-gray-700 hover:bg-black/5"
                   }`}
                 >
-                  <button
-                    onClick={() => enterSketch(plane, sketch)}
-                    className="flex-1 text-left pl-6 pr-1 py-1 truncate"
-                  >
-                    ✎ {sketch.name}{" "}
-                    <span className="opacity-50">({sketch.points.length}점)</span>
-                  </button>
                   <span
                     role="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (!busy) handleDeleteSketch(sketch);
+                      if (hasChildren) togglePlaneCollapsed(plane.id);
                     }}
-                    className="text-[10px] opacity-60 hover:opacity-100 px-2"
-                    title="스케치 삭제"
+                    className="w-4 shrink-0 text-center text-[9px] leading-none select-none"
                   >
-                    🗑
+                    {hasChildren ? (isCollapsed ? "▸" : "▾") : ""}
+                  </span>
+                  <span
+                    className={`inline-block w-2.5 h-2.5 shrink-0 border ${
+                      isPlaneActive ? "border-white/70" : "border-gray-400"
+                    }`}
+                  />
+                  <span className="flex-1 truncate">{plane.label}</span>
+                  <span
+                    role="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!busy) handleCreateSketch(plane);
+                    }}
+                    className="text-[10px] opacity-0 group-hover:opacity-70 hover:!opacity-100 px-1"
+                    title="새 스케치 만들기"
+                  >
+                    +
                   </span>
                 </div>
-              ))}
-            </div>
-          ))}
+                {!isCollapsed &&
+                  plane.sketches.map((sketch) => (
+                    <div
+                      key={sketch.id}
+                      className={`group w-full flex items-center pl-5 pr-1 rounded-md ${
+                        sketch.id === activeSketchId
+                          ? "bg-gray-900/90 text-white"
+                          : "text-gray-500 hover:bg-black/5"
+                      }`}
+                    >
+                      <span className="w-4 shrink-0" />
+                      <button
+                        onClick={() => enterSketch(plane, sketch)}
+                        className="flex-1 text-left py-1 truncate"
+                      >
+                        ✎ {sketch.name}{" "}
+                        <span className="opacity-50">({sketch.points.length}점)</span>
+                      </button>
+                      <span
+                        role="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!busy) handleDeleteSketch(sketch);
+                        }}
+                        className="text-[10px] opacity-0 group-hover:opacity-60 hover:!opacity-100 px-1"
+                        title="스케치 삭제"
+                      >
+                        🗑
+                      </span>
+                    </div>
+                  ))}
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -1372,33 +1405,6 @@ export default function ProjectCanvas({
                   </button>
                 </div>
               )}
-
-              {pendingPerpEdge && (
-                <div className="flex items-center gap-2 text-xs bg-white border border-gray-300 rounded-md px-3 py-1.5">
-                  <span className="text-gray-500">끝점을 선택하세요</span>
-                  <button
-                    onClick={() => !busy && handleCreatePerpPlane(pendingPerpEdge.from)}
-                    disabled={busy}
-                    className="px-2 py-1 rounded border border-gray-300 text-gray-700 disabled:opacity-50"
-                  >
-                    시작점 ({pendingPerpEdge.from.x}, {pendingPerpEdge.from.y},{" "}
-                    {pendingPerpEdge.from.z})mm
-                  </button>
-                  <button
-                    onClick={() => !busy && handleCreatePerpPlane(pendingPerpEdge.to)}
-                    disabled={busy}
-                    className="px-2 py-1 rounded border border-gray-300 text-gray-700 disabled:opacity-50"
-                  >
-                    끝점 ({pendingPerpEdge.to.x}, {pendingPerpEdge.to.y}, {pendingPerpEdge.to.z})mm
-                  </button>
-                  <button
-                    onClick={() => setPendingPerpEdge(null)}
-                    className="px-2 py-1 rounded text-gray-400"
-                  >
-                    취소
-                  </button>
-                </div>
-              )}
             </>
           ) : (
             <>
@@ -1463,9 +1469,20 @@ export default function ProjectCanvas({
                   </button>
                 </div>
               )}
-              {selectedActiveEdgeId && (
+              {selectedActiveEdgeId && !pendingPerpEdge && (
                 <div className="flex items-center gap-2 text-xs bg-white border border-gray-300 rounded-md px-3 py-1.5">
                   <span className="text-gray-500">선 선택됨</span>
+                  <button
+                    onClick={() => {
+                      const e = activeEdgesRef.current.get(selectedActiveEdgeId);
+                      const from = e && activePointsRef.current.get(e.fromId);
+                      const to = e && activePointsRef.current.get(e.toId);
+                      if (from && to) setPendingPerpEdge({ from, to });
+                    }}
+                    className="px-2 py-1 rounded bg-gray-900 text-white"
+                  >
+                    이 선에 수직인 평면 만들기
+                  </button>
                   <button
                     onClick={handleDeleteSelectedEdge}
                     className="px-2 py-1 rounded bg-red-500 text-white"
@@ -1518,6 +1535,33 @@ export default function ProjectCanvas({
                 {saving ? "저장 중..." : "저장"}
               </button>
             </>
+          )}
+
+          {pendingPerpEdge && (
+            <div className="flex items-center gap-2 text-xs bg-white border border-gray-300 rounded-md px-3 py-1.5">
+              <span className="text-gray-500">끝점을 선택하세요</span>
+              <button
+                onClick={() => !busy && handleCreatePerpPlane(pendingPerpEdge.from)}
+                disabled={busy}
+                className="px-2 py-1 rounded border border-gray-300 text-gray-700 disabled:opacity-50"
+              >
+                시작점 ({pendingPerpEdge.from.x}, {pendingPerpEdge.from.y}, {pendingPerpEdge.from.z}
+                )mm
+              </button>
+              <button
+                onClick={() => !busy && handleCreatePerpPlane(pendingPerpEdge.to)}
+                disabled={busy}
+                className="px-2 py-1 rounded border border-gray-300 text-gray-700 disabled:opacity-50"
+              >
+                끝점 ({pendingPerpEdge.to.x}, {pendingPerpEdge.to.y}, {pendingPerpEdge.to.z})mm
+              </button>
+              <button
+                onClick={() => setPendingPerpEdge(null)}
+                className="px-2 py-1 rounded text-gray-400"
+              >
+                취소
+              </button>
+            </div>
           )}
         </div>
 
