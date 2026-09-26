@@ -18,7 +18,7 @@ import {
 
 type Vec3 = { x: number; y: number; z: number };
 type Axis = "XY" | "YZ" | "XZ";
-type PointRec = { id: string; x: number; y: number; z: number };
+type PointRec = { id: string; x: number; y: number; z: number; isVertex?: boolean };
 type EdgeRec = { id: string; fromId: string; toId: string };
 type SketchData = { id: string; name: string; points: PointRec[]; edges: EdgeRec[] };
 type PlaneData = {
@@ -504,6 +504,7 @@ export default function ProjectCanvas({
         }
 
         for (const p of sketch.points) {
+          if (p.isVertex === false) continue; // 자유곡선 중간 보간점은 점으로 안 보여준다
           const isHighlighted = highlightedPointIds.has(p.id);
           const geo = new THREE.SphereGeometry(isHighlighted ? 0.05 : 0.028, 12, 12);
           const mat = new THREE.MeshBasicMaterial({
@@ -676,7 +677,9 @@ export default function ProjectCanvas({
     clearActiveGeometry();
     for (const p of sketch.points) activePointsRef.current.set(p.id, p);
     for (const e of sketch.edges) activeEdgesRef.current.set(e.id, e);
-    for (const [id, p] of activePointsRef.current) addActivePointMesh(id, p);
+    for (const [id, p] of activePointsRef.current) {
+      if (p.isVertex !== false) addActivePointMesh(id, p);
+    }
     for (const [, e] of activeEdgesRef.current) addActiveEdgeLine(e);
     setPointCount(activePointsRef.current.size);
     setEdgeCount(activeEdgesRef.current.size);
@@ -877,6 +880,7 @@ export default function ProjectCanvas({
         x: sceneToMm(target.x),
         y: sceneToMm(target.y),
         z: sceneToMm(target.z),
+        isVertex: showPoint,
       };
       activePointsRef.current.set(pointId, rec);
       if (showPoint) addActivePointMesh(pointId, rec);

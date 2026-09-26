@@ -43,7 +43,13 @@ export default async function ProjectPage({
         sketches: p.sketches.map((s) => ({
           id: s.id,
           name: s.name,
-          points: s.points.map((pt) => ({ id: pt.id, x: pt.x, y: pt.y, z: pt.z })),
+          points: s.points.map((pt) => ({
+            id: pt.id,
+            x: pt.x,
+            y: pt.y,
+            z: pt.z,
+            isVertex: pt.isVertex,
+          })),
           edges: s.edges.map((e) => ({ id: e.id, fromId: e.fromId, toId: e.toId })),
         })),
       }))}

@@ -83,6 +83,10 @@ model Point {
   x         Float
   y         Float
   z         Float
+  // 자유곡선(손그림)을 잘게 쪼갠 중간 보간점은 false. 화면에 점(구슬)으로
+  // 안 보이고 선 모양만 유지하는 용도로 존재한다. 진짜 꼭짓점(탭으로
+  // 찍었거나 스트로크 시작/끝점)은 true.
+  isVertex  Boolean  @default(true)
   groupId   String?
   group     Group?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
   createdAt DateTime @default(now())

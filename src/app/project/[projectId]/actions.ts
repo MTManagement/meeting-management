@@ -167,7 +167,7 @@ export async function deleteSketch(projectId: string, sketchId: string) {
   await prisma.sketch.delete({ where: { id: sketchId } });
 }
 
-type PointInput = { id: string; x: number; y: number; z: number };
+type PointInput = { id: string; x: number; y: number; z: number; isVertex?: boolean };
 type EdgeInput = { fromId: string; toId: string };
 
 // 스케치 하나(평면 하나에 종속된 점/선 묶음)의 내용을 통째로 저장한다.
@@ -190,7 +190,7 @@ export async function saveSketchGeometry(
     const idMap = new Map<string, string>();
     for (const p of points) {
       const created = await tx.point.create({
-        data: { projectId, sketchId, x: p.x, y: p.y, z: p.z },
+        data: { projectId, sketchId, x: p.x, y: p.y, z: p.z, isVertex: p.isVertex ?? true },
       });
       idMap.set(p.id, created.id);
     }
