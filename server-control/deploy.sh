@@ -62,8 +62,8 @@ docker rmi mtmanagement-server:latest >/dev/null 2>&1 || true
 
 cd "$SERVER_DIR"
 
-log "docker-compose build"
-docker-compose build
+log "docker-compose build (캐시 사용 안 함 - 코드가 바뀌었는데 이전 빌드 캐시를 재사용해서 반영이 안 되는 문제가 있었음)"
+docker-compose build --no-cache
 
 log "docker-compose up -d"
 docker-compose up -d
