@@ -5,6 +5,10 @@ import { useRouter } from "next/navigation";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
+  CSS2DRenderer,
+  CSS2DObject,
+} from "three/examples/jsm/renderers/CSS2DRenderer.js";
+import {
   createOffsetPlane,
   createPerpendicularPlane,
   createSketch,
@@ -69,6 +73,25 @@ function toThreePlane(plane: PlaneData): THREE.Plane {
   return new THREE.Plane(normal, -normal.dot(origin));
 }
 
+function distanceMm(a: Vec3, b: Vec3) {
+  return Math.round(Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z));
+}
+
+function createLabelDiv(text: string) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  div.style.pointerEvents = "none";
+  div.style.padding = "1px 5px";
+  div.style.borderRadius = "3px";
+  div.style.fontSize = "11px";
+  div.style.fontFamily = "inherit";
+  div.style.background = "rgba(250, 246, 238, 0.9)";
+  div.style.color = "#4b4b4b";
+  div.style.border = "1px solid rgba(75, 75, 75, 0.25)";
+  div.style.whiteSpace = "nowrap";
+  return div;
+}
+
 const TAP_MAX_MOVE = 8; // px
 const TAP_MAX_MS = 500;
 
@@ -98,6 +121,7 @@ export default function ProjectCanvas({
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const labelRendererRef = useRef<CSS2DRenderer | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
 
   const planeCardGroupRef = useRef<THREE.Group | null>(null);
@@ -105,18 +129,25 @@ export default function ProjectCanvas({
   const gridGroupRef = useRef<THREE.Group | null>(null);
   const activePointGroupRef = useRef<THREE.Group | null>(null);
   const activeEdgeGroupRef = useRef<THREE.Group | null>(null);
+  const activeLabelGroupRef = useRef<THREE.Group | null>(null);
+  const previewGroupRef = useRef<THREE.Group | null>(null);
 
   const activePointMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
   const activeEdgeLinesRef = useRef<Map<string, THREE.Line>>(new Map());
+  const activeEdgeLabelsRef = useRef<Map<string, CSS2DObject>>(new Map());
   const activePointsRef = useRef<Map<string, PointRec>>(new Map());
   const activeEdgesRef = useRef<Map<string, EdgeRec>>(new Map());
   const lastPointIdRef = useRef<string | null>(null);
   const dirtyRef = useRef(false);
 
+  const previewLineRef = useRef<THREE.Line | null>(null);
+  const previewLabelRef = useRef<CSS2DObject | null>(null);
+  const draggingPointIdRef = useRef<string | null>(null);
+
   const [mode, setMode] = useState<"overview" | "sketch">("overview");
   const [activePlaneId, setActivePlaneId] = useState<string | null>(null);
   const [activeSketchId, setActiveSketchId] = useState<string | null>(null);
-  const [drawing, setDrawing] = useState(true);
+  const [tool, setTool] = useState<"pen" | "move">("pen");
 
   const [selectedPlaneId, setSelectedPlaneId] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<{
@@ -172,11 +203,23 @@ export default function ProjectCanvas({
     camera.position.set(6, 5, 8);
     cameraRef.current = camera;
 
+    mount.style.position = "relative";
+
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     mount.appendChild(renderer.domElement);
     rendererRef.current = renderer;
+
+    // 치수(길이) 라벨을 HTML로 캔버스 위에 겹쳐 그리기 위한 오버레이 렌더러.
+    const labelRenderer = new CSS2DRenderer();
+    labelRenderer.setSize(mount.clientWidth, mount.clientHeight);
+    labelRenderer.domElement.style.position = "absolute";
+    labelRenderer.domElement.style.top = "0";
+    labelRenderer.domElement.style.left = "0";
+    labelRenderer.domElement.style.pointerEvents = "none";
+    mount.appendChild(labelRenderer.domElement);
+    labelRendererRef.current = labelRenderer;
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 0, 0);
@@ -202,17 +245,30 @@ export default function ProjectCanvas({
     const gridGroup = new THREE.Group();
     const activePointGroup = new THREE.Group();
     const activeEdgeGroup = new THREE.Group();
-    scene.add(planeCardGroup, refGeometryGroup, gridGroup, activePointGroup, activeEdgeGroup);
+    const activeLabelGroup = new THREE.Group();
+    const previewGroup = new THREE.Group();
+    scene.add(
+      planeCardGroup,
+      refGeometryGroup,
+      gridGroup,
+      activePointGroup,
+      activeEdgeGroup,
+      activeLabelGroup,
+      previewGroup
+    );
     planeCardGroupRef.current = planeCardGroup;
     refGeometryGroupRef.current = refGeometryGroup;
     gridGroupRef.current = gridGroup;
     activePointGroupRef.current = activePointGroup;
     activeEdgeGroupRef.current = activeEdgeGroup;
+    activeLabelGroupRef.current = activeLabelGroup;
+    previewGroupRef.current = previewGroup;
 
     let raf = 0;
     const animate = () => {
       controls.update();
       renderer.render(scene, camera);
+      labelRenderer.render(scene, camera);
       raf = requestAnimationFrame(animate);
     };
     animate();
@@ -222,6 +278,7 @@ export default function ProjectCanvas({
       camera.aspect = mount.clientWidth / mount.clientHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(mount.clientWidth, mount.clientHeight);
+      labelRenderer.setSize(mount.clientWidth, mount.clientHeight);
     };
     window.addEventListener("resize", onResize);
 
@@ -231,6 +288,7 @@ export default function ProjectCanvas({
       controls.dispose();
       renderer.dispose();
       mount.removeChild(renderer.domElement);
+      mount.removeChild(labelRenderer.domElement);
     };
   }, []);
 
@@ -345,14 +403,52 @@ export default function ProjectCanvas({
     line.userData = { kind: "edge", sketchId: activeSketchId, from, to };
     activeEdgeGroupRef.current?.add(line);
     activeEdgeLinesRef.current.set(e.id, line);
+
+    const label = new CSS2DObject(createLabelDiv(`${distanceMm(from, to)}mm`));
+    label.position.copy(vecMm(from).add(vecMm(to)).multiplyScalar(0.5));
+    activeLabelGroupRef.current?.add(label);
+    activeEdgeLabelsRef.current.set(e.id, label);
   }
   function removeActiveEdgeLine(id: string) {
     const line = activeEdgeLinesRef.current.get(id);
-    if (!line) return;
-    activeEdgeGroupRef.current?.remove(line);
-    line.geometry.dispose();
-    (line.material as THREE.Material).dispose();
-    activeEdgeLinesRef.current.delete(id);
+    if (line) {
+      activeEdgeGroupRef.current?.remove(line);
+      line.geometry.dispose();
+      (line.material as THREE.Material).dispose();
+      activeEdgeLinesRef.current.delete(id);
+    }
+    const label = activeEdgeLabelsRef.current.get(id);
+    if (label) {
+      activeLabelGroupRef.current?.remove(label);
+      activeEdgeLabelsRef.current.delete(id);
+    }
+  }
+  // 점 하나가 움직였을 때, 그 점이 끝점인 모든 선의 지오메트리와 치수
+  // 라벨을 다시 계산한다 (점 드래그 중 실시간으로 호출됨).
+  function refreshEdgesForPoint(pointId: string) {
+    for (const [edgeId, e] of activeEdgesRef.current) {
+      if (e.fromId !== pointId && e.toId !== pointId) continue;
+      const from = activePointsRef.current.get(e.fromId);
+      const to = activePointsRef.current.get(e.toId);
+      if (!from || !to) continue;
+
+      const line = activeEdgeLinesRef.current.get(edgeId);
+      if (line) {
+        const posAttr = line.geometry.attributes.position as THREE.BufferAttribute;
+        const fromVec = vecMm(from);
+        const toVec = vecMm(to);
+        posAttr.setXYZ(0, fromVec.x, fromVec.y, fromVec.z);
+        posAttr.setXYZ(1, toVec.x, toVec.y, toVec.z);
+        posAttr.needsUpdate = true;
+        line.userData = { ...line.userData, from, to };
+      }
+
+      const label = activeEdgeLabelsRef.current.get(edgeId);
+      if (label) {
+        label.position.copy(vecMm(from).add(vecMm(to)).multiplyScalar(0.5));
+        label.element.textContent = `${distanceMm(from, to)}mm`;
+      }
+    }
   }
   function clearActiveGeometry() {
     for (const id of [...activePointMeshesRef.current.keys()]) removeActivePointMesh(id);
@@ -417,7 +513,7 @@ export default function ProjectCanvas({
     setActivePlaneId(plane.id);
     setActiveSketchId(sketch.id);
     setMode("sketch");
-    setDrawing(true);
+    setTool("pen");
     setSelectedPlaneId(null);
     setSelectedEdge(null);
     setPendingPerpEdge(null);
@@ -430,6 +526,8 @@ export default function ProjectCanvas({
       if (!ok) return;
     }
     clearActiveGeometry();
+    hideDrawPreview();
+    draggingPointIdRef.current = null;
     setActivePlaneId(null);
     setActiveSketchId(null);
     setMode("overview");
@@ -601,6 +699,74 @@ export default function ProjectCanvas({
     lastPointIdRef.current = pointId;
   }
 
+  // ── 그리는 중 고무줄(rubber-band) 미리보기 선 + 실시간 치수 라벨 ──
+  function updateDrawPreview(clientX: number, clientY: number) {
+    const last = lastPointIdRef.current;
+    const from = last ? activePointsRef.current.get(last) : null;
+    const target = raycastToActivePlane(clientX, clientY);
+    if (!from || !target) {
+      hideDrawPreview();
+      return;
+    }
+
+    const fromVec = vecMm(from);
+    if (!previewLineRef.current) {
+      const geo = new THREE.BufferGeometry().setFromPoints([fromVec, target]);
+      const mat = new THREE.LineDashedMaterial({
+        color: SELECT_COLOR,
+        dashSize: 0.08,
+        gapSize: 0.05,
+      });
+      const line = new THREE.Line(geo, mat);
+      previewGroupRef.current?.add(line);
+      previewLineRef.current = line;
+    } else {
+      const posAttr = previewLineRef.current.geometry.attributes
+        .position as THREE.BufferAttribute;
+      posAttr.setXYZ(0, fromVec.x, fromVec.y, fromVec.z);
+      posAttr.setXYZ(1, target.x, target.y, target.z);
+      posAttr.needsUpdate = true;
+    }
+    previewLineRef.current.computeLineDistances();
+
+    const lengthMm = distanceMm(
+      { x: from.x, y: from.y, z: from.z },
+      { x: sceneToMm(target.x), y: sceneToMm(target.y), z: sceneToMm(target.z) }
+    );
+    const mid = fromVec.clone().add(target).multiplyScalar(0.5);
+    if (!previewLabelRef.current) {
+      const label = new CSS2DObject(createLabelDiv(`${lengthMm}mm`));
+      previewGroupRef.current?.add(label);
+      previewLabelRef.current = label;
+    }
+    previewLabelRef.current.position.copy(mid);
+    previewLabelRef.current.element.textContent = `${lengthMm}mm`;
+  }
+  function hideDrawPreview() {
+    if (previewLineRef.current) {
+      previewGroupRef.current?.remove(previewLineRef.current);
+      previewLineRef.current.geometry.dispose();
+      (previewLineRef.current.material as THREE.Material).dispose();
+      previewLineRef.current = null;
+    }
+    if (previewLabelRef.current) {
+      previewGroupRef.current?.remove(previewLabelRef.current);
+      previewLabelRef.current = null;
+    }
+  }
+
+  // ── 점 이동(드래그) ──────────────────────────────────────────────
+  function movePointTo(pointId: string, target: THREE.Vector3) {
+    const rec = activePointsRef.current.get(pointId);
+    if (!rec) return;
+    rec.x = sceneToMm(target.x);
+    rec.y = sceneToMm(target.y);
+    rec.z = sceneToMm(target.z);
+    const mesh = activePointMeshesRef.current.get(pointId);
+    mesh?.position.copy(target);
+    refreshEdgesForPoint(pointId);
+  }
+
   // OrbitControls는 터치 시작 시 제스처 종류와 무관하게 항상
   // preventDefault()를 호출해서, 브라우저가 탭을 click 이벤트로
   // 합성하는 걸 막아버린다. 그래서 click에 의존하지 않고
@@ -609,38 +775,66 @@ export default function ProjectCanvas({
 
   function handlePointerDown(e: React.PointerEvent) {
     pointerDownRef.current = { x: e.clientX, y: e.clientY, time: nowMs() };
+
+    if (mode === "sketch" && tool === "move") {
+      const target = raycastToActivePlane(e.clientX, e.clientY);
+      if (target) {
+        const pointId = findNearbyActivePoint(target);
+        if (pointId) {
+          draggingPointIdRef.current = pointId;
+          e.currentTarget.setPointerCapture(e.pointerId);
+        }
+      }
+    }
   }
 
   function handlePointerUp(e: React.PointerEvent) {
     const down = pointerDownRef.current;
     pointerDownRef.current = null;
+
+    if (draggingPointIdRef.current) {
+      draggingPointIdRef.current = null;
+      dirtyRef.current = true;
+      return; // 점을 옮기던 중이었으면 탭/클릭으로 처리하지 않는다.
+    }
+
     if (!down) return;
     if (!isTap(down, { x: e.clientX, y: e.clientY })) return; // 드래그(회전)로 판단, 무시
 
     if (mode === "sketch") {
-      if (drawing) handleDrawClick(e.clientX, e.clientY);
+      if (tool === "pen") handleDrawClick(e.clientX, e.clientY);
       return;
     }
     handleOverviewClick(e.clientX, e.clientY);
   }
 
   function handleCanvasMove(e: React.PointerEvent) {
-    if (mode !== "sketch" || !drawing) return;
+    if (mode !== "sketch") return;
+
+    if (draggingPointIdRef.current) {
+      const target = raycastToActivePlane(e.clientX, e.clientY);
+      if (!target) return;
+      movePointTo(draggingPointIdRef.current, target);
+      setCursorMm({ x: sceneToMm(target.x), y: sceneToMm(target.y), z: sceneToMm(target.z) });
+      return;
+    }
+
+    if (tool !== "pen") return;
     const target = raycastToActivePlane(e.clientX, e.clientY);
     if (!target) return;
     setCursorMm({ x: sceneToMm(target.x), y: sceneToMm(target.y), z: sceneToMm(target.z) });
+    if (lastPointIdRef.current) updateDrawPreview(e.clientX, e.clientY);
   }
 
-  function handleTogglePen() {
-    setDrawing((prev) => {
-      const next = !prev;
-      if (next && activePlane) snapCameraFlat(activePlane);
-      return next;
-    });
+  function handleSetTool(next: "pen" | "move") {
+    setTool(next);
+    if (activePlane) snapCameraFlat(activePlane);
+    hideDrawPreview();
   }
 
   function handleNewStroke() {
     lastPointIdRef.current = null;
+    hideDrawPreview();
   }
 
   function handleUndo() {
@@ -659,12 +853,14 @@ export default function ProjectCanvas({
     setPointCount(activePointsRef.current.size);
     setEdgeCount(activeEdgesRef.current.size);
     lastPointIdRef.current = null;
+    hideDrawPreview();
     dirtyRef.current = true;
   }
 
   function handleClearAll() {
     if (!confirm("현재 스케치의 모든 점과 선을 지울까요? (저장 전까지는 되돌릴 수 있습니다)")) return;
     clearActiveGeometry();
+    hideDrawPreview();
     setPointCount(0);
     setEdgeCount(0);
     dirtyRef.current = true;
@@ -682,6 +878,7 @@ export default function ProjectCanvas({
       const result = await saveSketchGeometry(projectId, activeSketchId, pointsArr, edgesArr);
 
       clearActiveGeometry();
+      hideDrawPreview();
       for (const p of result.points) {
         activePointsRef.current.set(p.id, p);
         addActivePointMesh(p.id, p);
@@ -883,14 +1080,24 @@ export default function ProjectCanvas({
                   .find((s) => s.id === activeSketchId)?.name}
               </span>
               <button
-                onClick={handleTogglePen}
+                onClick={() => handleSetTool("pen")}
                 className={`text-xs px-2.5 py-1.5 rounded-md border ${
-                  drawing
+                  tool === "pen"
                     ? "bg-gray-900 text-white border-gray-900"
                     : "bg-white text-gray-600 border-gray-300"
                 }`}
               >
                 ✎ 그리기
+              </button>
+              <button
+                onClick={() => handleSetTool("move")}
+                className={`text-xs px-2.5 py-1.5 rounded-md border ${
+                  tool === "move"
+                    ? "bg-gray-900 text-white border-gray-900"
+                    : "bg-white text-gray-600 border-gray-300"
+                }`}
+              >
+                ✥ 점 이동
               </button>
               <button
                 onClick={handleNewStroke}
