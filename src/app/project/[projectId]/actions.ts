@@ -119,7 +119,7 @@ export async function createSketch(projectId: string, planeId: string) {
   await assertOwner(projectId);
   const count = await prisma.sketch.count({ where: { planeId } });
   const sketch = await prisma.sketch.create({
-    data: { projectId, planeId, name: `스케치 ${count + 1}` },
+    data: { projectId, planeId, name: `Line ${count + 1}` },
   });
   return sketch;
 }

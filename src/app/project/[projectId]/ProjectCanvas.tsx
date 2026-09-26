@@ -32,7 +32,8 @@ type PlaneData = {
 
 const PAPER_BG = 0xfaf6ee;
 const PENCIL = 0x4b4b4b;
-const PENCIL_DIM = 0xcfc7b8;
+const PENCIL_DIM = 0xcfc7b8; // 평면 카드·그리드 등 "구성선"용 (연함)
+const REF_EDGE = 0x9c9178; // 저장된 스케치의 실제 선/점 (구성선보다 진하게, 구분되도록)
 const PLANE_CARD = 0x9a9284;
 const PLANE_CARD_ACTIVE = 0x4b4b4b;
 const SELECT_COLOR = 0xc2410c; // 선택된 선/끝점 강조색 (주황)
@@ -221,6 +222,11 @@ export default function ProjectCanvas({
   const previewLineRef = useRef<THREE.Line | null>(null);
   const previewLabelRef = useRef<CSS2DObject | null>(null);
   const draggingPointIdRef = useRef<string | null>(null);
+  // 손가락/펜/마우스로 누른 채 그은 궤적(삐뚤빼뚤해도 됨). 떼면 시작~끝을
+  // 잇는 직선으로 확정된다.
+  const strokeActiveRef = useRef(false);
+  const strokeRawPointsRef = useRef<THREE.Vector3[]>([]);
+  const freehandLineRef = useRef<THREE.Line | null>(null);
   const lastMouseClientRef = useRef<{ x: number; y: number } | null>(null);
   const lastPreviewDirRef = useRef<THREE.Vector3 | null>(null);
   const typedLengthRef = useRef<string>("");
@@ -471,7 +477,7 @@ export default function ProjectCanvas({
             vecMm(to),
           ]);
           const mat = new THREE.LineBasicMaterial({
-            color: isSelectedEdge ? SELECT_COLOR : PENCIL_DIM,
+            color: isSelectedEdge ? SELECT_COLOR : REF_EDGE,
             linewidth: isSelectedEdge ? 3 : 1,
           });
           const line = new THREE.Line(geo, mat);
@@ -487,9 +493,9 @@ export default function ProjectCanvas({
 
         for (const p of sketch.points) {
           const isHighlighted = highlightedPointIds.has(p.id);
-          const geo = new THREE.SphereGeometry(isHighlighted ? 0.09 : 0.045, 12, 12);
+          const geo = new THREE.SphereGeometry(isHighlighted ? 0.05 : 0.028, 12, 12);
           const mat = new THREE.MeshBasicMaterial({
-            color: isHighlighted ? SELECT_COLOR : PENCIL_DIM,
+            color: isHighlighted ? SELECT_COLOR : REF_EDGE,
           });
           const mesh = new THREE.Mesh(geo, mat);
           mesh.position.copy(vecMm(p));
@@ -501,7 +507,7 @@ export default function ProjectCanvas({
 
   // ── 활성 스케치용 점/선 메시 헬퍼 ──────────────────────────────
   function addActivePointMesh(id: string, p: PointRec) {
-    const geo = new THREE.SphereGeometry(0.06, 12, 12);
+    const geo = new THREE.SphereGeometry(0.032, 12, 12);
     const mat = new THREE.MeshBasicMaterial({ color: PENCIL });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.set(mmToScene(p.x), mmToScene(p.y), mmToScene(p.z));
@@ -705,6 +711,12 @@ export default function ProjectCanvas({
     }
   }
 
+  // 오버뷰에서 평면을 탭하면 "선택"만 하지 않고 바로 새 스케치를
+  // 만들어 그리기 모드로 들어간다 (트리에는 "Line N"으로 추가됨).
+  async function handleQuickDrawOnPlane(plane: PlaneData) {
+    await handleCreateSketch(plane);
+  }
+
   async function handleDeleteSketch(sketch: SketchData) {
     if (!confirm(`"${sketch.name}" 스케치를 삭제할까요? 되돌릴 수 없습니다.`)) return;
     setBusy(true);
@@ -783,8 +795,8 @@ export default function ProjectCanvas({
     }
     const obj = hits[0].object;
     if (obj.userData.kind === "plane") {
-      setSelectedPlaneId(obj.userData.planeId);
-      setSelectedEdge(null);
+      const plane = planes.find((p) => p.id === obj.userData.planeId);
+      if (plane && !busy) handleQuickDrawOnPlane(plane);
     } else if (obj.userData.kind === "edge") {
       setSelectedEdge({
         edgeId: obj.userData.edgeId,
@@ -860,17 +872,21 @@ export default function ProjectCanvas({
     clearTypedLength();
   }
 
-  function handleDrawClick(clientX: number, clientY: number) {
-    const raw = raycastToActivePlane(clientX, clientY);
-    if (!raw) return;
-    // 격자·직교 스냅보다 "근처 기존 점에 물리는 것"을 항상 우선한다.
-    // 그렇지 않으면 도형을 닫으려고 첫 점 근처를 찍었을 때 마그네틱
-    // 스냅이 커서를 다른 방향으로 틀어버려서 정확히 안 물릴 수 있다.
+  // 격자·직교 스냅보다 "근처 기존 점에 물리는 것"을 항상 우선한다.
+  // 그렇지 않으면 도형을 닫으려고 첫 점 근처를 찍었을 때 마그네틱
+  // 스냅이 커서를 다른 방향으로 틀어버려서 정확히 안 물릴 수 있다.
+  function commitDrawPointFromRaw(raw: THREE.Vector3) {
     const nearbyId = findNearbyActivePoint(raw);
     const target = nearbyId
       ? vecMm(activePointsRef.current.get(nearbyId)!)
       : applyOrthoSnap(applySnap(raw));
     commitDrawPoint(target);
+  }
+
+  function handleDrawClick(clientX: number, clientY: number) {
+    const raw = raycastToActivePlane(clientX, clientY);
+    if (!raw) return;
+    commitDrawPointFromRaw(raw);
   }
 
   // ── 그리는 중 고무줄(rubber-band) 미리보기 선 + 실시간 치수 라벨 ──
@@ -959,6 +975,32 @@ export default function ProjectCanvas({
     }
     lastPreviewDirRef.current = null;
     clearTypedLength();
+    strokeActiveRef.current = false;
+    strokeRawPointsRef.current = [];
+    hideFreehandPreview();
+  }
+
+  // ── 손으로 그은 궤적 실시간 미리보기 (누른 채 이동할 때) ──────────
+  function updateFreehandPreview() {
+    const pts = strokeRawPointsRef.current;
+    if (pts.length < 2) return;
+    if (!freehandLineRef.current) {
+      const geo = new THREE.BufferGeometry().setFromPoints(pts);
+      const mat = new THREE.LineBasicMaterial({ color: PENCIL });
+      const line = new THREE.Line(geo, mat);
+      previewGroupRef.current?.add(line);
+      freehandLineRef.current = line;
+    } else {
+      freehandLineRef.current.geometry.dispose();
+      freehandLineRef.current.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+    }
+  }
+  function hideFreehandPreview() {
+    if (!freehandLineRef.current) return;
+    previewGroupRef.current?.remove(freehandLineRef.current);
+    freehandLineRef.current.geometry.dispose();
+    (freehandLineRef.current.material as THREE.Material).dispose();
+    freehandLineRef.current = null;
   }
 
   // ── 키보드로 치수 직접 입력 (그리는 중, 숫자 입력 후 Enter) ──────
@@ -1109,6 +1151,12 @@ export default function ProjectCanvas({
           e.currentTarget.setPointerCapture(e.pointerId);
         }
       }
+    } else if (mode === "sketch" && tool === "pen") {
+      const raw = raycastToActivePlane(e.clientX, e.clientY);
+      if (raw) {
+        strokeActiveRef.current = true;
+        strokeRawPointsRef.current = [raw.clone()];
+      }
     }
   }
 
@@ -1151,12 +1199,30 @@ export default function ProjectCanvas({
       return;
     }
 
+    if (mode === "sketch" && tool === "pen" && strokeActiveRef.current) {
+      strokeActiveRef.current = false;
+      const rawPoints = strokeRawPointsRef.current;
+      strokeRawPointsRef.current = [];
+      hideFreehandPreview();
+      if (rawPoints.length === 0) return;
+
+      const wasTap = down && isTap(down, { x: e.clientX, y: e.clientY });
+      if (wasTap) {
+        // 거의 안 움직였으면 기존처럼 탭 한 번 = 점 하나
+        handleDrawClick(e.clientX, e.clientY);
+      } else {
+        // 누른 채 그은 궤적(곡선·삐뚤빼뚤해도 됨) → 시작점~끝점을 직선으로 확정
+        commitDrawPointFromRaw(rawPoints[0]);
+        commitDrawPointFromRaw(rawPoints[rawPoints.length - 1]);
+      }
+      return;
+    }
+
     if (!down) return;
     if (!isTap(down, { x: e.clientX, y: e.clientY })) return; // 드래그(회전)로 판단, 무시
 
     if (mode === "sketch") {
-      if (tool === "pen") handleDrawClick(e.clientX, e.clientY);
-      else if (tool === "move") handleActiveEdgeTap(e.clientX, e.clientY);
+      if (tool === "move") handleActiveEdgeTap(e.clientX, e.clientY);
       return;
     }
     handleOverviewClick(e.clientX, e.clientY);
@@ -1176,6 +1242,16 @@ export default function ProjectCanvas({
     if (tool !== "pen") return;
     const raw = raycastToActivePlane(e.clientX, e.clientY);
     if (!raw) return;
+
+    if (strokeActiveRef.current) {
+      // 누르고 있는 동안엔 스냅 없이 실제 손 궤적 그대로 보여준다
+      // (삐뚤빼뚤해도 됨 — 떼는 순간 시작~끝 직선으로 확정됨)
+      strokeRawPointsRef.current.push(raw.clone());
+      updateFreehandPreview();
+      setCursorMm({ x: sceneToMm(raw.x), y: sceneToMm(raw.y), z: sceneToMm(raw.z) });
+      return;
+    }
+
     const target = applyOrthoSnap(applySnap(raw));
     setCursorMm({ x: sceneToMm(target.x), y: sceneToMm(target.y), z: sceneToMm(target.z) });
     if (lastPointIdRef.current) updateDrawPreview(e.clientX, e.clientY);
