@@ -229,6 +229,9 @@ export default function ProjectCanvas({
   const freehandLineRef = useRef<THREE.Line | null>(null);
   const strokeStraightModeRef = useRef(false); // 이번 스트로크가 직선으로 전환됐는지
   const strokeHoldTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 동시에 눌려있는 포인터(손가락) id 집합. 두 손가락째가 닿으면 그리기/드래그를
+  // 즉시 취소하고 OrbitControls의 두 손가락 확대·회전 제스처에 넘겨준다.
+  const activePointerIdsRef = useRef<Set<number>>(new Set());
   const lastMouseClientRef = useRef<{ x: number; y: number } | null>(null);
   const lastPreviewDirRef = useRef<THREE.Vector3 | null>(null);
   const typedLengthRef = useRef<string>("");
@@ -531,7 +534,7 @@ export default function ProjectCanvas({
     (mesh.material as THREE.Material).dispose();
     activePointMeshesRef.current.delete(id);
   }
-  function addActiveEdgeLine(e: EdgeRec) {
+  function addActiveEdgeLine(e: EdgeRec, showLabel = true) {
     const from = activePointsRef.current.get(e.fromId);
     const to = activePointsRef.current.get(e.toId);
     if (!from || !to) return;
@@ -542,6 +545,7 @@ export default function ProjectCanvas({
     activeEdgeGroupRef.current?.add(line);
     activeEdgeLinesRef.current.set(e.id, line);
 
+    if (!showLabel) return;
     const labelDiv = createEditableLabelDiv(`${distanceMm(from, to)}mm`, (mm) =>
       applyEdgeLength(e.id, mm)
     );
@@ -852,7 +856,9 @@ export default function ProjectCanvas({
 
   // 점 하나를 찍고(가까운 점 있으면 그 점 사용), 이전 점이 있으면 선까지 잇는다.
   // 마우스 클릭과 키보드 치수 입력(Enter) 양쪽에서 공용으로 쓴다.
-  function commitDrawPoint(target: THREE.Vector3) {
+  // showLabel=false면 치수 라벨을 안 붙인다 (자유곡선을 잘게 쪼갠 구간용 —
+  // 30mm 단위 조각마다 치수가 다 뜨면 지저분하므로, 진짜 직선을 그을 때만 보여준다).
+  function commitDrawPoint(target: THREE.Vector3, showLabel = true) {
     let pointId = findNearbyActivePoint(target);
     if (!pointId) {
       pointId = `tmp_${crypto.randomUUID()}`;
@@ -873,7 +879,7 @@ export default function ProjectCanvas({
       const edgeId = `tmp_${crypto.randomUUID()}`;
       const rec: EdgeRec = { id: edgeId, fromId: last, toId: pointId };
       activeEdgesRef.current.set(edgeId, rec);
-      addActiveEdgeLine(rec);
+      addActiveEdgeLine(rec, showLabel);
       setEdgeCount(activeEdgesRef.current.size);
       dirtyRef.current = true;
     }
@@ -884,19 +890,21 @@ export default function ProjectCanvas({
   // 격자·직교 스냅보다 "근처 기존 점에 물리는 것"을 항상 우선한다.
   // 그렇지 않으면 도형을 닫으려고 첫 점 근처를 찍었을 때 마그네틱
   // 스냅이 커서를 다른 방향으로 틀어버려서 정확히 안 물릴 수 있다.
-  function commitDrawPointFromRaw(raw: THREE.Vector3, snap = true) {
+  function commitDrawPointFromRaw(raw: THREE.Vector3, snap = true, showLabel = true) {
     const nearbyId = findNearbyActivePoint(raw);
     const target = nearbyId
       ? vecMm(activePointsRef.current.get(nearbyId)!)
       : snap
         ? applyOrthoSnap(applySnap(raw))
         : raw;
-    commitDrawPoint(target);
+    commitDrawPoint(target, showLabel);
   }
 
   // 자유곡선 그대로 그린 궤적을 여러 짧은 직선(점 여러 개)으로 커밋한다.
   // 궤적의 모든 점을 다 쓰면 너무 촘촘하므로 일정 거리 이상 떨어진
   // 점만 남기고, 중간 점들은 스냅을 걸지 않아 손그림 느낌을 유지한다.
+  // 조각마다 치수 라벨이 뜨면 지저분하니 자유곡선 구간에는 라벨을 안 붙인다
+  // (치수는 실제로 "직선으로" 그은 선에만 표시된다).
   const FREEHAND_MIN_DIST = 0.03; // scene 단위 ≈ 30mm
   function commitFreehandStroke(rawPoints: THREE.Vector3[]) {
     if (rawPoints.length === 0) return;
@@ -908,7 +916,7 @@ export default function ProjectCanvas({
     }
     const last = rawPoints[rawPoints.length - 1];
     if (simplified[simplified.length - 1] !== last) simplified.push(last);
-    for (const p of simplified) commitDrawPointFromRaw(p, false);
+    for (const p of simplified) commitDrawPointFromRaw(p, false, false);
   }
 
   function handleDrawClick(clientX: number, clientY: number) {
@@ -1188,7 +1196,35 @@ export default function ProjectCanvas({
   // pointerdown/pointerup을 직접 비교해서 "탭/클릭인지"를 판단한다.
   const pointerDownRef = useRef<{ x: number; y: number; time: number } | null>(null);
 
+  // 그리기/점 드래그 중에 손가락이 하나 더 닿으면(핀치 줌·회전 제스처)
+  // 즉시 취소하고 OrbitControls의 두 손가락 제스처로 넘겨준다.
+  function cancelInteractionForMultiTouch() {
+    pointerDownRef.current = null;
+    if (draggingPointIdRef.current) {
+      draggingPointIdRef.current = null;
+    }
+    if (strokeActiveRef.current) {
+      strokeActiveRef.current = false;
+      strokeRawPointsRef.current = [];
+      strokeStraightModeRef.current = false;
+      clearHoldTimeout();
+      hideFreehandPreview();
+    }
+  }
+
+  function handlePointerCancel(e: React.PointerEvent) {
+    activePointerIdsRef.current.delete(e.pointerId);
+    cancelInteractionForMultiTouch();
+  }
+
   function handlePointerDown(e: React.PointerEvent) {
+    activePointerIdsRef.current.add(e.pointerId);
+    if (activePointerIdsRef.current.size > 1) {
+      // 두 번째 손가락 — 그리기/드래그로 취급하지 않는다.
+      cancelInteractionForMultiTouch();
+      return;
+    }
+
     pointerDownRef.current = { x: e.clientX, y: e.clientY, time: nowMs() };
 
     if (mode === "sketch" && tool === "move") {
@@ -1236,6 +1272,13 @@ export default function ProjectCanvas({
   }
 
   function handlePointerUp(e: React.PointerEvent) {
+    activePointerIdsRef.current.delete(e.pointerId);
+    if (activePointerIdsRef.current.size > 0) {
+      // 아직 다른 손가락이 남아있다 (핀치/회전 제스처 도중) — 그리기로 처리하지 않는다.
+      pointerDownRef.current = null;
+      return;
+    }
+
     const down = pointerDownRef.current;
     pointerDownRef.current = null;
 
@@ -1289,6 +1332,7 @@ export default function ProjectCanvas({
 
   function handleCanvasMove(e: React.PointerEvent) {
     if (mode !== "sketch") return;
+    if (activePointerIdsRef.current.size > 1) return; // 두 손가락 제스처 중엔 관여하지 않는다
 
     if (draggingPointIdRef.current) {
       const target = raycastToActivePlane(e.clientX, e.clientY);
@@ -1807,6 +1851,7 @@ export default function ProjectCanvas({
           style={{ touchAction: "none" }}
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
           onPointerMove={handleCanvasMove}
           onContextMenu={handleCanvasContextMenu}
         />
