@@ -195,6 +195,7 @@ export default function ProjectCanvas({
 }) {
   const router = useRouter();
   const mountRef = useRef<HTMLDivElement>(null);
+  const gizmoMountRef = useRef<HTMLDivElement>(null);
 
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -317,6 +318,53 @@ export default function ProjectCanvas({
     mount.appendChild(labelRenderer.domElement);
     labelRendererRef.current = labelRenderer;
 
+    // ── 방향 축(기즈모): 화면 구석에서 지금 카메라가 보는 방향을 보여준다 ──
+    const gizmoMount = gizmoMountRef.current;
+    let gizmoRenderer: THREE.WebGLRenderer | null = null;
+    let gizmoLabelRenderer: CSS2DRenderer | null = null;
+    let gizmoScene: THREE.Scene | null = null;
+    let gizmoCamera: THREE.OrthographicCamera | null = null;
+    const GIZMO_SIZE = 72;
+    if (gizmoMount) {
+      gizmoScene = new THREE.Scene();
+      gizmoCamera = new THREE.OrthographicCamera(-1.6, 1.6, 1.6, -1.6, 0.1, 10);
+
+      gizmoRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      gizmoRenderer.setPixelRatio(window.devicePixelRatio);
+      gizmoRenderer.setSize(GIZMO_SIZE, GIZMO_SIZE);
+      gizmoRenderer.setClearColor(0x000000, 0);
+      gizmoMount.appendChild(gizmoRenderer.domElement);
+
+      gizmoLabelRenderer = new CSS2DRenderer();
+      gizmoLabelRenderer.setSize(GIZMO_SIZE, GIZMO_SIZE);
+      gizmoLabelRenderer.domElement.style.position = "absolute";
+      gizmoLabelRenderer.domElement.style.top = "0";
+      gizmoLabelRenderer.domElement.style.left = "0";
+      gizmoLabelRenderer.domElement.style.pointerEvents = "none";
+      gizmoMount.appendChild(gizmoLabelRenderer.domElement);
+
+      const axes: { dir: THREE.Vector3; color: number; label: string }[] = [
+        { dir: new THREE.Vector3(1, 0, 0), color: 0xd9534f, label: "X" },
+        { dir: new THREE.Vector3(0, 1, 0), color: 0x4caf50, label: "Y" },
+        { dir: new THREE.Vector3(0, 0, 1), color: 0x3d7fc9, label: "Z" },
+      ];
+      for (const { dir, color, label } of axes) {
+        const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), dir]);
+        const mat = new THREE.LineBasicMaterial({ color });
+        gizmoScene.add(new THREE.Line(geo, mat));
+
+        const div = document.createElement("div");
+        div.textContent = label;
+        div.style.color = `#${color.toString(16).padStart(6, "0")}`;
+        div.style.fontSize = "11px";
+        div.style.fontWeight = "700";
+        div.style.pointerEvents = "none";
+        const labelObj = new CSS2DObject(div);
+        labelObj.position.copy(dir.clone().multiplyScalar(1.3));
+        gizmoScene.add(labelObj);
+      }
+    }
+
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 0, 0);
     controls.enableDamping = true;
@@ -365,6 +413,18 @@ export default function ProjectCanvas({
       controls.update();
       renderer.render(scene, camera);
       labelRenderer.render(scene, camera);
+
+      if (gizmoRenderer && gizmoLabelRenderer && gizmoScene && gizmoCamera) {
+        const dir = camera.position.clone().sub(controls.target);
+        if (dir.lengthSq() > 1e-6) {
+          gizmoCamera.position.copy(dir.normalize().multiplyScalar(4));
+          gizmoCamera.up.copy(camera.up);
+          gizmoCamera.lookAt(0, 0, 0);
+        }
+        gizmoRenderer.render(gizmoScene, gizmoCamera);
+        gizmoLabelRenderer.render(gizmoScene, gizmoCamera);
+      }
+
       raf = requestAnimationFrame(animate);
     };
     animate();
@@ -385,6 +445,13 @@ export default function ProjectCanvas({
       renderer.dispose();
       mount.removeChild(renderer.domElement);
       mount.removeChild(labelRenderer.domElement);
+      if (gizmoMount && gizmoRenderer) {
+        gizmoRenderer.dispose();
+        gizmoMount.removeChild(gizmoRenderer.domElement);
+      }
+      if (gizmoMount && gizmoLabelRenderer) {
+        gizmoMount.removeChild(gizmoLabelRenderer.domElement);
+      }
     };
   }, []);
 
@@ -1289,11 +1356,18 @@ export default function ProjectCanvas({
                   >
                     {hasChildren ? (isCollapsed ? "▸" : "▾") : ""}
                   </span>
-                  <span
-                    className={`inline-block w-2.5 h-2.5 shrink-0 border ${
-                      isPlaneActive ? "border-white/70" : "border-gray-400"
+                  <svg
+                    viewBox="0 0 16 16"
+                    className={`w-3.5 h-3.5 shrink-0 ${
+                      isPlaneActive ? "text-white/80" : "text-gray-400"
                     }`}
-                  />
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.3"
+                  >
+                    <path d="M2 5.5L8 2l6 3.5-6 3.5-6-3.5Z" />
+                    <path d="M2 5.5v5L8 14l6-3.5v-5" />
+                  </svg>
                   <span className="flex-1 truncate">{plane.label}</span>
                   <span
                     role="button"
@@ -1611,6 +1685,10 @@ export default function ProjectCanvas({
           onPointerUp={handlePointerUp}
           onPointerMove={handleCanvasMove}
           onContextMenu={handleCanvasContextMenu}
+        />
+        <div
+          ref={gizmoMountRef}
+          className="absolute bottom-4 right-4 z-10 w-[72px] h-[72px] rounded-full bg-white/70 backdrop-blur-sm pointer-events-none"
         />
       </div>
     </div>
