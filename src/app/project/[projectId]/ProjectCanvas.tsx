@@ -604,9 +604,9 @@ export default function ProjectCanvas({
   const selectedPlane = planes.find((p) => p.id === selectedPlaneId) ?? null;
 
   return (
-    <div className="flex h-screen bg-[#faf6ee]">
-      {/* 좌측 트리 */}
-      <div className="w-64 shrink-0 border-r border-black/10 bg-white/60 flex flex-col">
+    <div className="relative h-screen w-full bg-[#faf6ee] overflow-hidden">
+      {/* 좌측 트리 (캔버스 위에 떠 있는 패널, 레이아웃을 나누지 않음) */}
+      <div className="absolute top-[4.75rem] left-3 z-10 w-64 max-h-[calc(100vh-5.5rem)] flex flex-col rounded-lg border border-black/10 bg-white/90 backdrop-blur-sm shadow-lg">
         <div className="px-3 py-3 border-b border-black/10">
           <p className="text-sm font-bold text-gray-900 truncate">{projectName}</p>
         </div>
@@ -656,9 +656,9 @@ export default function ProjectCanvas({
         </div>
       </div>
 
-      {/* 우측 캔버스 영역 */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 border-b border-black/10 bg-[#faf6ee]">
+      {/* 캔버스 영역: 트리 패널 뒤까지 화면 전체를 채운다 */}
+      <div className="absolute inset-0 flex flex-col">
+        <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 border-b border-black/10 bg-[#faf6ee]/90 backdrop-blur-sm">
           {mode === "overview" ? (
             <>
               <div className="flex items-center gap-1 mr-auto">
