@@ -227,6 +227,8 @@ export default function ProjectCanvas({
   const strokeActiveRef = useRef(false);
   const strokeRawPointsRef = useRef<THREE.Vector3[]>([]);
   const freehandLineRef = useRef<THREE.Line | null>(null);
+  const strokeStraightModeRef = useRef(false); // 이번 스트로크가 직선으로 전환됐는지
+  const strokeHoldTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastMouseClientRef = useRef<{ x: number; y: number } | null>(null);
   const lastPreviewDirRef = useRef<THREE.Vector3 | null>(null);
   const typedLengthRef = useRef<string>("");
@@ -263,6 +265,13 @@ export default function ProjectCanvas({
   // 격자 스냅: 켜두면 점 찍기/이동 좌표가 지정한 mm 간격으로 자동 정렬됨
   const [snapEnabled, setSnapEnabled] = useState(false);
   const [snapSizeInput, setSnapSizeInput] = useState("50");
+
+  // 그리기 방식: 둘 다 꺼져 있으면(기본) 누른 채로 그은 궤적 그대로
+  // 그려지다가 1초 이상 멈추면 그 순간부터 직선으로 바뀐다.
+  // "이어그리기"를 켜면 탭으로 점을 찍어서 잇는 기존 방식.
+  // "직선으로 그리기"를 켜면 궤적과 무관하게 항상 시작~끝 직선.
+  const [chainMode, setChainMode] = useState(false);
+  const [straightMode, setStraightMode] = useState(false);
 
   // 그리는 중 키보드로 입력한 치수(숫자). 상태바 표시용이고 실제 값은 ref에 있다.
   const [typedLength, setTypedLength] = useState("");
@@ -875,12 +884,31 @@ export default function ProjectCanvas({
   // 격자·직교 스냅보다 "근처 기존 점에 물리는 것"을 항상 우선한다.
   // 그렇지 않으면 도형을 닫으려고 첫 점 근처를 찍었을 때 마그네틱
   // 스냅이 커서를 다른 방향으로 틀어버려서 정확히 안 물릴 수 있다.
-  function commitDrawPointFromRaw(raw: THREE.Vector3) {
+  function commitDrawPointFromRaw(raw: THREE.Vector3, snap = true) {
     const nearbyId = findNearbyActivePoint(raw);
     const target = nearbyId
       ? vecMm(activePointsRef.current.get(nearbyId)!)
-      : applyOrthoSnap(applySnap(raw));
+      : snap
+        ? applyOrthoSnap(applySnap(raw))
+        : raw;
     commitDrawPoint(target);
+  }
+
+  // 자유곡선 그대로 그린 궤적을 여러 짧은 직선(점 여러 개)으로 커밋한다.
+  // 궤적의 모든 점을 다 쓰면 너무 촘촘하므로 일정 거리 이상 떨어진
+  // 점만 남기고, 중간 점들은 스냅을 걸지 않아 손그림 느낌을 유지한다.
+  const FREEHAND_MIN_DIST = 0.03; // scene 단위 ≈ 30mm
+  function commitFreehandStroke(rawPoints: THREE.Vector3[]) {
+    if (rawPoints.length === 0) return;
+    const simplified = [rawPoints[0]];
+    for (let i = 1; i < rawPoints.length; i++) {
+      if (rawPoints[i].distanceTo(simplified[simplified.length - 1]) >= FREEHAND_MIN_DIST) {
+        simplified.push(rawPoints[i]);
+      }
+    }
+    const last = rawPoints[rawPoints.length - 1];
+    if (simplified[simplified.length - 1] !== last) simplified.push(last);
+    for (const p of simplified) commitDrawPointFromRaw(p, false);
   }
 
   function handleDrawClick(clientX: number, clientY: number) {
@@ -977,22 +1005,43 @@ export default function ProjectCanvas({
     clearTypedLength();
     strokeActiveRef.current = false;
     strokeRawPointsRef.current = [];
+    strokeStraightModeRef.current = false;
+    clearHoldTimeout();
     hideFreehandPreview();
+  }
+
+  // 손을 움직이지 않고 HOLD_MS 이상 멈춰 있으면 그 순간부터 직선
+  // 모드로 전환한다. 움직일 때마다 타이머를 다시 건다.
+  const HOLD_MS = 1000;
+  function clearHoldTimeout() {
+    if (strokeHoldTimeoutRef.current) {
+      clearTimeout(strokeHoldTimeoutRef.current);
+      strokeHoldTimeoutRef.current = null;
+    }
+  }
+  function scheduleHoldTimeout() {
+    clearHoldTimeout();
+    strokeHoldTimeoutRef.current = setTimeout(() => {
+      strokeStraightModeRef.current = true;
+      updateFreehandPreview();
+    }, HOLD_MS);
   }
 
   // ── 손으로 그은 궤적 실시간 미리보기 (누른 채 이동할 때) ──────────
   function updateFreehandPreview() {
     const pts = strokeRawPointsRef.current;
     if (pts.length < 2) return;
+    // 직선 모드로 전환됐으면 시작~현재 두 점만, 아니면 궤적 전체를 그대로.
+    const renderPts = strokeStraightModeRef.current ? [pts[0], pts[pts.length - 1]] : pts;
     if (!freehandLineRef.current) {
-      const geo = new THREE.BufferGeometry().setFromPoints(pts);
+      const geo = new THREE.BufferGeometry().setFromPoints(renderPts);
       const mat = new THREE.LineBasicMaterial({ color: PENCIL });
       const line = new THREE.Line(geo, mat);
       previewGroupRef.current?.add(line);
       freehandLineRef.current = line;
     } else {
       freehandLineRef.current.geometry.dispose();
-      freehandLineRef.current.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+      freehandLineRef.current.geometry = new THREE.BufferGeometry().setFromPoints(renderPts);
     }
   }
   function hideFreehandPreview() {
@@ -1151,11 +1200,14 @@ export default function ProjectCanvas({
           e.currentTarget.setPointerCapture(e.pointerId);
         }
       }
-    } else if (mode === "sketch" && tool === "pen") {
+    } else if (mode === "sketch" && tool === "pen" && !chainMode) {
       const raw = raycastToActivePlane(e.clientX, e.clientY);
       if (raw) {
         strokeActiveRef.current = true;
         strokeRawPointsRef.current = [raw.clone()];
+        strokeStraightModeRef.current = straightMode;
+        if (!straightMode) scheduleHoldTimeout();
+        e.currentTarget.setPointerCapture(e.pointerId);
       }
     }
   }
@@ -1201,8 +1253,11 @@ export default function ProjectCanvas({
 
     if (mode === "sketch" && tool === "pen" && strokeActiveRef.current) {
       strokeActiveRef.current = false;
+      clearHoldTimeout();
       const rawPoints = strokeRawPointsRef.current;
+      const wasStraight = strokeStraightModeRef.current;
       strokeRawPointsRef.current = [];
+      strokeStraightModeRef.current = false;
       hideFreehandPreview();
       if (rawPoints.length === 0) return;
 
@@ -1210,10 +1265,13 @@ export default function ProjectCanvas({
       if (wasTap) {
         // 거의 안 움직였으면 기존처럼 탭 한 번 = 점 하나
         handleDrawClick(e.clientX, e.clientY);
-      } else {
-        // 누른 채 그은 궤적(곡선·삐뚤빼뚤해도 됨) → 시작점~끝점을 직선으로 확정
+      } else if (wasStraight) {
+        // 직선 모드(체크박스 또는 1초 멈춤으로 전환) → 시작점~끝점 직선
         commitDrawPointFromRaw(rawPoints[0]);
         commitDrawPointFromRaw(rawPoints[rawPoints.length - 1]);
+      } else {
+        // 자유곡선 그대로(삐뚤빼뚤 유지) → 궤적을 따라 여러 점으로 커밋
+        commitFreehandStroke(rawPoints);
       }
       return;
     }
@@ -1222,7 +1280,8 @@ export default function ProjectCanvas({
     if (!isTap(down, { x: e.clientX, y: e.clientY })) return; // 드래그(회전)로 판단, 무시
 
     if (mode === "sketch") {
-      if (tool === "move") handleActiveEdgeTap(e.clientX, e.clientY);
+      if (tool === "pen" && chainMode) handleDrawClick(e.clientX, e.clientY);
+      else if (tool === "move") handleActiveEdgeTap(e.clientX, e.clientY);
       return;
     }
     handleOverviewClick(e.clientX, e.clientY);
@@ -1244,9 +1303,10 @@ export default function ProjectCanvas({
     if (!raw) return;
 
     if (strokeActiveRef.current) {
-      // 누르고 있는 동안엔 스냅 없이 실제 손 궤적 그대로 보여준다
-      // (삐뚤빼뚤해도 됨 — 떼는 순간 시작~끝 직선으로 확정됨)
       strokeRawPointsRef.current.push(raw.clone());
+      // 직선 모드가 아니면 계속 움직이는 동안은 멈춤 타이머를 계속 미룬다
+      // (1초 이상 안 움직이면 그때 직선 모드로 전환됨)
+      if (!straightMode && !strokeStraightModeRef.current) scheduleHoldTimeout();
       updateFreehandPreview();
       setCursorMm({ x: sceneToMm(raw.x), y: sceneToMm(raw.y), z: sceneToMm(raw.z) });
       return;
@@ -1555,6 +1615,34 @@ export default function ProjectCanvas({
               >
                 {tool === "pen" ? "✎ 그리는 중" : "✥ 수정 중 (그리기 켜기)"}
               </button>
+
+              {tool === "pen" && (
+                <>
+                  <label
+                    className="flex items-center gap-1 text-xs text-gray-500 px-1"
+                    title="켜면 탭으로 점을 찍어서 잇는 기존 방식"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={chainMode}
+                      onChange={(e) => setChainMode(e.target.checked)}
+                    />
+                    이어그리기
+                  </label>
+                  <label
+                    className="flex items-center gap-1 text-xs text-gray-500 px-1"
+                    title="켜면 누른 채 그은 궤적과 무관하게 항상 시작~끝 직선으로 그려짐"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={straightMode}
+                      disabled={chainMode}
+                      onChange={(e) => setStraightMode(e.target.checked)}
+                    />
+                    직선으로 그리기
+                  </label>
+                </>
+              )}
 
               <label className="flex items-center gap-1 text-xs text-gray-500 px-1">
                 <input
