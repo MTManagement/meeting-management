@@ -8,6 +8,7 @@ import {
   createOffsetPlane,
   createPerpendicularPlane,
   createSketch,
+  deleteSketch,
   saveSketchGeometry,
 } from "./actions";
 
@@ -150,6 +151,18 @@ export default function ProjectCanvas({
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 0, 0);
     controls.enableDamping = true;
+    // 좌클릭/한 손가락 탭은 회전에 쓰지 않고 점 찍기·선택용으로 남겨둔다.
+    // 회전은 마우스 가운데 버튼이나 두 손가락 제스처로만 하도록 제한한다.
+    // (그대로 두면 OrbitControls가 탭/클릭을 소비해서 그리기·선택 클릭이 씹힌다)
+    controls.mouseButtons = {
+      LEFT: null as unknown as THREE.MOUSE,
+      MIDDLE: THREE.MOUSE.ROTATE,
+      RIGHT: THREE.MOUSE.PAN,
+    };
+    controls.touches = {
+      ONE: null as unknown as THREE.TOUCH,
+      TWO: THREE.TOUCH.DOLLY_ROTATE,
+    };
     controlsRef.current = controls;
 
     scene.add(new THREE.AmbientLight(0xffffff, 1));
@@ -376,6 +389,23 @@ export default function ProjectCanvas({
     try {
       const sketch = await createSketch(projectId, plane.id);
       enterSketch(plane, { id: sketch.id, name: sketch.name, points: [], edges: [] });
+      router.refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteSketch(sketch: SketchData) {
+    if (!confirm(`"${sketch.name}" 스케치를 삭제할까요? 되돌릴 수 없습니다.`)) return;
+    setBusy(true);
+    try {
+      await deleteSketch(projectId, sketch.id);
+      if (sketch.id === activeSketchId) {
+        clearActiveGeometry();
+        setActivePlaneId(null);
+        setActiveSketchId(null);
+        setMode("overview");
+      }
       router.refresh();
     } finally {
       setBusy(false);
@@ -638,18 +668,33 @@ export default function ProjectCanvas({
                 </span>
               </button>
               {plane.sketches.map((sketch) => (
-                <button
+                <div
                   key={sketch.id}
-                  onClick={() => enterSketch(plane, sketch)}
-                  className={`w-full text-left pl-6 pr-2 py-1 rounded-md ${
+                  className={`w-full flex items-center justify-between rounded-md ${
                     sketch.id === activeSketchId
                       ? "bg-gray-900/90 text-white"
                       : "text-gray-500 hover:bg-black/5"
                   }`}
                 >
-                  ✎ {sketch.name}{" "}
-                  <span className="opacity-50">({sketch.points.length}점)</span>
-                </button>
+                  <button
+                    onClick={() => enterSketch(plane, sketch)}
+                    className="flex-1 text-left pl-6 pr-1 py-1 truncate"
+                  >
+                    ✎ {sketch.name}{" "}
+                    <span className="opacity-50">({sketch.points.length}점)</span>
+                  </button>
+                  <span
+                    role="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!busy) handleDeleteSketch(sketch);
+                    }}
+                    className="text-[10px] opacity-60 hover:opacity-100 px-2"
+                    title="스케치 삭제"
+                  >
+                    🗑
+                  </span>
+                </div>
               ))}
             </div>
           ))}
@@ -796,6 +841,17 @@ export default function ProjectCanvas({
                 className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
               >
                 전체 지우기
+              </button>
+              <button
+                onClick={() => {
+                  const sketch = planes
+                    .flatMap((p) => p.sketches)
+                    .find((s) => s.id === activeSketchId);
+                  if (sketch && !busy) handleDeleteSketch(sketch);
+                }}
+                className="text-xs px-2.5 py-1.5 rounded-md border border-red-200 bg-white text-red-500"
+              >
+                스케치 삭제
               </button>
               <button
                 onClick={handleSave}

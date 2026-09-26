@@ -122,6 +122,16 @@ export async function createSketch(projectId: string, planeId: string) {
   return sketch;
 }
 
+export async function deleteSketch(projectId: string, sketchId: string) {
+  await assertOwner(projectId);
+  const sketch = await prisma.sketch.findUnique({ where: { id: sketchId } });
+  if (!sketch || sketch.projectId !== projectId) {
+    throw new Error("스케치를 찾을 수 없습니다.");
+  }
+  // Point/Edge는 onDelete: Cascade로 함께 삭제된다.
+  await prisma.sketch.delete({ where: { id: sketchId } });
+}
+
 type PointInput = { id: string; x: number; y: number; z: number };
 type EdgeInput = { fromId: string; toId: string };
 
