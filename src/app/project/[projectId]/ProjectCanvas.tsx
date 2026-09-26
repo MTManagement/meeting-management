@@ -39,6 +39,9 @@ const PLANE_CARD_ACTIVE = 0x4b4b4b;
 const SELECT_COLOR = 0xc2410c; // 선택된 선/끝점 강조색 (주황)
 const CARD_SIZE = 1.2; // scene 단위 (=1200mm)
 const GRID_SIZE = 10; // scene 단위 (=10m)
+const BASE_GRID_WIDTH_MM = 1000; // XY 평면에 항상 깔아두는 모눈종이 크기 (가로, X)
+const BASE_GRID_DEPTH_MM = 2000; // 모눈종이 크기 (세로, Y)
+const BASE_GRID_SPACING_MM = 100; // 모눈 한 칸 크기
 const FLAT_DISTANCE = 8; // 스케치 정면 뷰 카메라 거리 (scene 단위)
 
 // 모든 좌표·오프셋 값의 단위는 mm. Three.js 씬 내부는 보기 좋은 스케일을 위해
@@ -379,6 +382,24 @@ export default function ProjectCanvas({
       const labelObj = new CSS2DObject(div);
       labelObj.position.copy(dir.clone().multiplyScalar(AXIS_LEN * 1.25));
       scene.add(labelObj);
+    }
+
+    // ── XY 평면(바닥) 기준 모눈종이 — 항상 원점 중심으로 깔아둬서,
+    // 사용자가 평면도 그리듯 감을 잡을 수 있게 한다. PlaneGeometry는
+    // 기본으로 XY 평면(법선 Z)에 원점 중심으로 놓이므로 회전이 필요 없다.
+    {
+      const w = mmToScene(BASE_GRID_WIDTH_MM);
+      const h = mmToScene(BASE_GRID_DEPTH_MM);
+      const wSeg = Math.round(BASE_GRID_WIDTH_MM / BASE_GRID_SPACING_MM);
+      const hSeg = Math.round(BASE_GRID_DEPTH_MM / BASE_GRID_SPACING_MM);
+      const geo = new THREE.PlaneGeometry(w, h, wSeg, hSeg);
+      const mat = new THREE.MeshBasicMaterial({
+        color: PENCIL_DIM,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.6,
+      });
+      scene.add(new THREE.Mesh(geo, mat));
     }
 
     const planeCardGroup = new THREE.Group();
