@@ -217,7 +217,7 @@ export default function ProjectCanvas({
         const mat = new THREE.MeshBasicMaterial({
           color: isSelected ? PLANE_CARD_ACTIVE : PLANE_CARD,
           transparent: true,
-          opacity: isSelected ? 0.95 : 0.9,
+          opacity: isSelected ? 0.15 : 0.1,
           side: THREE.DoubleSide,
         });
         const mesh = new THREE.Mesh(geo, mat);
