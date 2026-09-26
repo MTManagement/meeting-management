@@ -37,7 +37,7 @@ const REF_EDGE = 0x9c9178; // 저장된 스케치의 실제 선/점 (구성선�
 const PLANE_CARD = 0x9a9284;
 const PLANE_CARD_ACTIVE = 0x4b4b4b;
 const SELECT_COLOR = 0xc2410c; // 선택된 선/끝점 강조색 (주황)
-const CARD_SIZE = 1.2; // scene 단위 (=1200mm)
+const CARD_SIZE = 0.3; // scene 단위 (=300mm)
 const GRID_SIZE = 10; // scene 단위 (=10m)
 const BASE_GRID_WIDTH_MM = 1000; // XY 평면에 항상 깔아두는 모눈종이 크기 (가로, X)
 const BASE_GRID_DEPTH_MM = 2000; // 모눈종이 크기 (세로, Y)
