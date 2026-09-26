@@ -77,6 +77,11 @@ function distanceMm(a: Vec3, b: Vec3) {
   return Math.round(Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z));
 }
 
+function snapMm(mm: number, size: number) {
+  if (size <= 0) return mm;
+  return Math.round(mm / size) * size;
+}
+
 function createLabelDiv(text: string) {
   const div = document.createElement("div");
   div.textContent = text;
@@ -89,6 +94,49 @@ function createLabelDiv(text: string) {
   div.style.color = "#4b4b4b";
   div.style.border = "1px solid rgba(75, 75, 75, 0.25)";
   div.style.whiteSpace = "nowrap";
+  return div;
+}
+
+// 치수 라벨을 클릭하면 숫자를 직접 입력해서 길이를 바꿀 수 있게 만든다
+// (from 점은 고정, to 점이 새 길이에 맞게 같은 방향으로 이동).
+function createEditableLabelDiv(text: string, onCommit: (mm: number) => void) {
+  const div = createLabelDiv(text);
+  div.style.pointerEvents = "auto";
+  div.style.cursor = "pointer";
+
+  div.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+  div.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const input = document.createElement("input");
+    input.type = "number";
+    input.value = div.textContent?.replace("mm", "") ?? "";
+    input.style.width = "60px";
+    input.style.fontSize = "11px";
+    input.style.padding = "0 2px";
+    input.style.border = "1px solid #c2410c";
+    input.style.borderRadius = "3px";
+    input.style.background = "#fff";
+    input.style.color = "#4b4b4b";
+    input.addEventListener("pointerdown", (e2) => e2.stopPropagation());
+    input.addEventListener("click", (e2) => e2.stopPropagation());
+
+    const commit = () => {
+      const value = parseFloat(input.value);
+      if (!Number.isNaN(value) && value > 0) onCommit(value);
+    };
+    input.addEventListener("keydown", (kev) => {
+      if (kev.key === "Enter") input.blur();
+      if (kev.key === "Escape") {
+        input.removeEventListener("blur", commit);
+        div.textContent = text;
+      }
+    });
+    input.addEventListener("blur", commit);
+
+    div.replaceChildren(input);
+    input.focus();
+    input.select();
+  });
   return div;
 }
 
@@ -168,6 +216,14 @@ export default function ProjectCanvas({
   const [edgeCount, setEdgeCount] = useState(0);
   const [cursorMm, setCursorMm] = useState<{ x: number; y: number; z: number } | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // 이동 도구에서 탭으로 선택한 점/선 (삭제용)
+  const [selectedPointId, setSelectedPointId] = useState<string | null>(null);
+  const [selectedActiveEdgeId, setSelectedActiveEdgeId] = useState<string | null>(null);
+
+  // 격자 스냅: 켜두면 점 찍기/이동 좌표가 지정한 mm 간격으로 자동 정렬됨
+  const [snapEnabled, setSnapEnabled] = useState(false);
+  const [snapSizeInput, setSnapSizeInput] = useState("50");
 
   const activePlane = planes.find((p) => p.id === activePlaneId) ?? null;
 
@@ -404,10 +460,32 @@ export default function ProjectCanvas({
     activeEdgeGroupRef.current?.add(line);
     activeEdgeLinesRef.current.set(e.id, line);
 
-    const label = new CSS2DObject(createLabelDiv(`${distanceMm(from, to)}mm`));
+    const labelDiv = createEditableLabelDiv(`${distanceMm(from, to)}mm`, (mm) =>
+      applyEdgeLength(e.id, mm)
+    );
+    const label = new CSS2DObject(labelDiv);
     label.position.copy(vecMm(from).add(vecMm(to)).multiplyScalar(0.5));
     activeLabelGroupRef.current?.add(label);
     activeEdgeLabelsRef.current.set(e.id, label);
+  }
+  // 치수 라벨에 직접 입력한 길이로 선을 맞춘다. from 점은 고정하고
+  // to 점을 같은 방향으로 새 길이만큼 이동시킨다.
+  function applyEdgeLength(edgeId: string, newLenMm: number) {
+    const e = activeEdgesRef.current.get(edgeId);
+    if (!e) return;
+    const from = activePointsRef.current.get(e.fromId);
+    const to = activePointsRef.current.get(e.toId);
+    if (!from || !to) return;
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dz = to.z - from.z;
+    const curLen = Math.hypot(dx, dy, dz) || 1;
+    const scale = newLenMm / curLen;
+    movePointTo(
+      e.toId,
+      vecMm({ x: from.x + dx * scale, y: from.y + dy * scale, z: from.z + dz * scale })
+    );
+    dirtyRef.current = true;
   }
   function removeActiveEdgeLine(id: string) {
     const line = activeEdgeLinesRef.current.get(id);
@@ -517,6 +595,8 @@ export default function ProjectCanvas({
     setSelectedPlaneId(null);
     setSelectedEdge(null);
     setPendingPerpEdge(null);
+    setSelectedPointId(null);
+    setSelectedActiveEdgeId(null);
     snapCameraFlat(plane);
   }
 
@@ -528,6 +608,8 @@ export default function ProjectCanvas({
     clearActiveGeometry();
     hideDrawPreview();
     draggingPointIdRef.current = null;
+    setSelectedPointId(null);
+    setSelectedActiveEdgeId(null);
     setActivePlaneId(null);
     setActiveSketchId(null);
     setMode("overview");
@@ -669,8 +751,9 @@ export default function ProjectCanvas({
   }
 
   function handleDrawClick(clientX: number, clientY: number) {
-    const target = raycastToActivePlane(clientX, clientY);
-    if (!target) return;
+    const raw = raycastToActivePlane(clientX, clientY);
+    if (!raw) return;
+    const target = applySnap(raw);
 
     let pointId = findNearbyActivePoint(target);
     if (!pointId) {
@@ -755,16 +838,75 @@ export default function ProjectCanvas({
     }
   }
 
+  // 격자 스냅이 켜져 있으면 좌표(mm)를 지정한 간격으로 반올림한다.
+  function applySnap(target: THREE.Vector3): THREE.Vector3 {
+    if (!snapEnabled) return target;
+    const size = parseFloat(snapSizeInput);
+    if (!size || size <= 0) return target;
+    return new THREE.Vector3(
+      mmToScene(snapMm(sceneToMm(target.x), size)),
+      mmToScene(snapMm(sceneToMm(target.y), size)),
+      mmToScene(snapMm(sceneToMm(target.z), size))
+    );
+  }
+
   // ── 점 이동(드래그) ──────────────────────────────────────────────
-  function movePointTo(pointId: string, target: THREE.Vector3) {
+  function movePointTo(pointId: string, targetRaw: THREE.Vector3) {
     const rec = activePointsRef.current.get(pointId);
     if (!rec) return;
+    const target = applySnap(targetRaw);
     rec.x = sceneToMm(target.x);
     rec.y = sceneToMm(target.y);
     rec.z = sceneToMm(target.z);
     const mesh = activePointMeshesRef.current.get(pointId);
     mesh?.position.copy(target);
     refreshEdgesForPoint(pointId);
+  }
+
+  // ── 이동 도구: 점/선 선택 강조 + 삭제 ────────────────────────────
+  function highlightActiveSelection(pointId: string | null, edgeId: string | null) {
+    for (const [id, mesh] of activePointMeshesRef.current) {
+      const isSel = id === pointId;
+      (mesh.material as THREE.MeshBasicMaterial).color.set(isSel ? SELECT_COLOR : PENCIL);
+      mesh.scale.setScalar(isSel ? 1.6 : 1);
+    }
+    for (const [id, line] of activeEdgeLinesRef.current) {
+      (line.material as THREE.LineBasicMaterial).color.set(id === edgeId ? SELECT_COLOR : PENCIL);
+    }
+  }
+  function selectActivePoint(id: string | null) {
+    setSelectedPointId(id);
+    setSelectedActiveEdgeId(null);
+    highlightActiveSelection(id, null);
+  }
+  function selectActiveEdge(id: string | null) {
+    setSelectedActiveEdgeId(id);
+    setSelectedPointId(null);
+    highlightActiveSelection(null, id);
+  }
+  function handleDeleteSelectedPoint() {
+    if (!selectedPointId) return;
+    const id = selectedPointId;
+    for (const [eid, e] of [...activeEdgesRef.current]) {
+      if (e.fromId !== id && e.toId !== id) continue;
+      removeActiveEdgeLine(eid);
+      activeEdgesRef.current.delete(eid);
+    }
+    removeActivePointMesh(id);
+    activePointsRef.current.delete(id);
+    if (lastPointIdRef.current === id) lastPointIdRef.current = null;
+    setPointCount(activePointsRef.current.size);
+    setEdgeCount(activeEdgesRef.current.size);
+    dirtyRef.current = true;
+    selectActivePoint(null);
+  }
+  function handleDeleteSelectedEdge() {
+    if (!selectedActiveEdgeId) return;
+    removeActiveEdgeLine(selectedActiveEdgeId);
+    activeEdgesRef.current.delete(selectedActiveEdgeId);
+    setEdgeCount(activeEdgesRef.current.size);
+    dirtyRef.current = true;
+    selectActiveEdge(null);
   }
 
   // OrbitControls는 터치 시작 시 제스처 종류와 무관하게 항상
@@ -788,14 +930,43 @@ export default function ProjectCanvas({
     }
   }
 
+  function handleActiveEdgeTap(clientX: number, clientY: number) {
+    const mount = mountRef.current;
+    const camera = cameraRef.current;
+    if (!mount || !camera) return;
+    const rect = mount.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+    const raycaster = new THREE.Raycaster();
+    raycaster.params.Line = { threshold: 0.08 };
+    raycaster.setFromCamera(mouse, camera);
+    const hits = raycaster.intersectObjects(activeEdgeGroupRef.current?.children ?? [], false);
+    if (hits.length === 0) {
+      selectActivePoint(null);
+      return;
+    }
+    const edgeId = [...activeEdgeLinesRef.current.entries()].find(
+      ([, line]) => line === hits[0].object
+    )?.[0];
+    selectActiveEdge(edgeId ?? null);
+  }
+
   function handlePointerUp(e: React.PointerEvent) {
     const down = pointerDownRef.current;
     pointerDownRef.current = null;
 
     if (draggingPointIdRef.current) {
+      const draggedId = draggingPointIdRef.current;
       draggingPointIdRef.current = null;
-      dirtyRef.current = true;
-      return; // 점을 옮기던 중이었으면 탭/클릭으로 처리하지 않는다.
+      const wasTap = down && isTap(down, { x: e.clientX, y: e.clientY });
+      if (wasTap) {
+        selectActivePoint(draggedId); // 거의 안 움직였으면 이동이 아니라 "선택"으로 처리
+      } else {
+        dirtyRef.current = true;
+      }
+      return;
     }
 
     if (!down) return;
@@ -803,6 +974,7 @@ export default function ProjectCanvas({
 
     if (mode === "sketch") {
       if (tool === "pen") handleDrawClick(e.clientX, e.clientY);
+      else if (tool === "move") handleActiveEdgeTap(e.clientX, e.clientY);
       return;
     }
     handleOverviewClick(e.clientX, e.clientY);
@@ -830,12 +1002,31 @@ export default function ProjectCanvas({
     setTool(next);
     if (activePlane) snapCameraFlat(activePlane);
     hideDrawPreview();
+    selectActivePoint(null);
   }
 
   function handleNewStroke() {
     lastPointIdRef.current = null;
     hideDrawPreview();
   }
+
+  // 오토캐드처럼 우클릭이나 Esc로 지금 그리던 선을 끊는다(선택 해제도 함께).
+  function handleCanvasContextMenu(e: React.MouseEvent) {
+    if (mode !== "sketch") return;
+    e.preventDefault();
+    handleNewStroke();
+  }
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      if (mode !== "sketch") return;
+      handleNewStroke();
+      selectActivePoint(null);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
 
   function handleUndo() {
     const last = lastPointIdRef.current;
@@ -861,6 +1052,8 @@ export default function ProjectCanvas({
     if (!confirm("현재 스케치의 모든 점과 선을 지울까요? (저장 전까지는 되돌릴 수 있습니다)")) return;
     clearActiveGeometry();
     hideDrawPreview();
+    setSelectedPointId(null);
+    setSelectedActiveEdgeId(null);
     setPointCount(0);
     setEdgeCount(0);
     dirtyRef.current = true;
@@ -879,6 +1072,8 @@ export default function ProjectCanvas({
 
       clearActiveGeometry();
       hideDrawPreview();
+      setSelectedPointId(null);
+      setSelectedActiveEdgeId(null);
       for (const p of result.points) {
         activePointsRef.current.set(p.id, p);
         addActivePointMesh(p.id, p);
@@ -1099,6 +1294,58 @@ export default function ProjectCanvas({
               >
                 ✥ 점 이동
               </button>
+
+              <label className="flex items-center gap-1 text-xs text-gray-500 px-1">
+                <input
+                  type="checkbox"
+                  checked={snapEnabled}
+                  onChange={(e) => setSnapEnabled(e.target.checked)}
+                />
+                격자 스냅
+              </label>
+              <input
+                value={snapSizeInput}
+                onChange={(e) => setSnapSizeInput(e.target.value)}
+                disabled={!snapEnabled}
+                className="w-14 text-xs border border-gray-300 rounded-md px-1.5 py-1.5 bg-white disabled:opacity-50"
+              />
+              <span className="text-[11px] text-gray-400 mr-1">mm</span>
+
+              {selectedPointId && (
+                <div className="flex items-center gap-2 text-xs bg-white border border-gray-300 rounded-md px-3 py-1.5">
+                  <span className="text-gray-500">점 선택됨</span>
+                  <button
+                    onClick={handleDeleteSelectedPoint}
+                    className="px-2 py-1 rounded bg-red-500 text-white"
+                  >
+                    점 삭제
+                  </button>
+                  <button
+                    onClick={() => selectActivePoint(null)}
+                    className="px-2 py-1 rounded text-gray-400"
+                  >
+                    선택 해제
+                  </button>
+                </div>
+              )}
+              {selectedActiveEdgeId && (
+                <div className="flex items-center gap-2 text-xs bg-white border border-gray-300 rounded-md px-3 py-1.5">
+                  <span className="text-gray-500">선 선택됨</span>
+                  <button
+                    onClick={handleDeleteSelectedEdge}
+                    className="px-2 py-1 rounded bg-red-500 text-white"
+                  >
+                    선 삭제
+                  </button>
+                  <button
+                    onClick={() => selectActiveEdge(null)}
+                    className="px-2 py-1 rounded text-gray-400"
+                  >
+                    선택 해제
+                  </button>
+                </div>
+              )}
+
               <button
                 onClick={handleNewStroke}
                 className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
@@ -1153,6 +1400,9 @@ export default function ProjectCanvas({
                   커서: {cursorMm.x}, {cursorMm.y}, {cursorMm.z} mm
                 </span>
               )}
+              {tool === "move" && (
+                <span>점을 눌러서 이동하거나 탭해서 선택, 선을 탭해서 선택하세요.</span>
+              )}
               {savedAt && <span>마지막 저장: {savedAt.toLocaleTimeString("ko-KR")}</span>}
             </>
           )}
@@ -1166,6 +1416,7 @@ export default function ProjectCanvas({
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
           onPointerMove={handleCanvasMove}
+          onContextMenu={handleCanvasContextMenu}
         />
       </div>
     </div>
