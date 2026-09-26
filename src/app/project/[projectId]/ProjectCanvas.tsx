@@ -651,13 +651,19 @@ export default function ProjectCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, activePlaneId]);
 
+  // OrbitControls는 생성될 때의 camera.up(월드 Z축)을 기준으로 회전축을
+  // 한 번만 계산해두고 그 뒤로 다시 읽지 않는다(three.js 소스 확인).
+  // 그래서 여기서 camera.up을 평면마다 바꿔버리면 화면에 보이는 방향과
+  // OrbitControls의 내부 회전 계산 기준이 어긋나서 두 손가락 회전이
+  // 이상하게 멈추거나 꼬이는 문제가 생긴다. camera.up은 항상 월드 Z로
+  // 고정해두고, 위치·바라보는 방향만 평면에 맞춘다.
   function snapCameraFlat(plane: PlaneData) {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     if (!camera || !controls) return;
-    const { origin, normal, vAxis } = planeBasis(plane);
+    const { origin, normal } = planeBasis(plane);
     camera.position.copy(origin.clone().add(normal.clone().multiplyScalar(FLAT_DISTANCE)));
-    camera.up.copy(vAxis);
+    camera.up.set(0, 0, 1);
     controls.target.copy(origin);
     camera.lookAt(origin);
     controls.update();
