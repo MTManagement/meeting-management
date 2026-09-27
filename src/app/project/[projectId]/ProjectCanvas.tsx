@@ -42,7 +42,7 @@ const GRID_SIZE = 10; // scene 단위 (=10m)
 const BASE_GRID_WIDTH_MM = 1000; // XY 평면에 항상 깔아두는 모눈종이 크기 (가로, X)
 const BASE_GRID_DEPTH_MM = 2000; // 모눈종이 크기 (세로, Y)
 const BASE_GRID_SPACING_MM = 100; // 모눈 한 칸 크기
-const FLAT_DISTANCE = 8; // 스케치 정면 뷰 카메라 거리 (scene 단위)
+const FLAT_DISTANCE = 2.5; // 스케치 정면 뷰 카메라 거리 (scene 단위)
 
 // 모든 좌표·오프셋 값의 단위는 mm. Three.js 씬 내부는 보기 좋은 스케일을 위해
 // 1 scene 단위 = 1000mm(=1m)로 렌더링만 축소해서 그린다.
@@ -316,7 +316,7 @@ export default function ProjectCanvas({
       0.1,
       1000
     );
-    camera.position.set(6, 8, 5);
+    camera.position.set(1.9, 2.5, 1.6);
     camera.up.set(0, 0, 1); // Z축을 상하(수직) 방향으로 사용
     cameraRef.current = camera;
 
@@ -944,8 +944,8 @@ export default function ProjectCanvas({
   // 궤적의 모든 점을 다 쓰면 너무 촘촘하므로 일정 거리 이상 떨어진
   // 점만 남기고, 중간 점들은 스냅을 걸지 않아 손그림 느낌을 유지한다.
   // 조각마다 치수 라벨이 뜨면 지저분하니 자유곡선 구간에는 라벨을 안 붙인다
-  // (치수는 실제로 "직선으로" 그은 선에만 표시된다). 마찬가지로 중간 보간점은
-  // 점 표시도 하지 않고, 스트로크의 시작/끝점만 점으로 보여준다.
+  // (치수는 실제로 "직선으로" 그은 선에만 표시된다). 점도 하나도 안
+  // 보여준다(시작/끝점 포함) — 손그림 느낌에는 점이 어울리지 않는다.
   const FREEHAND_MIN_DIST = 0.03; // scene 단위 ≈ 30mm
   function commitFreehandStroke(rawPoints: THREE.Vector3[]) {
     if (rawPoints.length === 0) return;
@@ -957,10 +957,7 @@ export default function ProjectCanvas({
     }
     const last = rawPoints[rawPoints.length - 1];
     if (simplified[simplified.length - 1] !== last) simplified.push(last);
-    simplified.forEach((p, i) => {
-      const isEndpoint = i === 0 || i === simplified.length - 1;
-      commitDrawPointFromRaw(p, false, false, isEndpoint);
-    });
+    for (const p of simplified) commitDrawPointFromRaw(p, false, false, false);
   }
 
   function handleDrawClick(clientX: number, clientY: number) {
@@ -1356,9 +1353,10 @@ export default function ProjectCanvas({
         // 거의 안 움직였으면 기존처럼 탭 한 번 = 점 하나
         handleDrawClick(e.clientX, e.clientY);
       } else if (wasStraight) {
-        // 직선 모드(체크박스 또는 1초 멈춤으로 전환) → 시작점~끝점 직선
-        commitDrawPointFromRaw(rawPoints[0]);
-        commitDrawPointFromRaw(rawPoints[rawPoints.length - 1]);
+        // 직선 모드(체크박스 또는 1초 멈춤으로 전환) → 시작점~끝점 직선.
+        // 드래그로 그은 선이라 점은 안 보여주고 치수만 보여준다.
+        commitDrawPointFromRaw(rawPoints[0], true, true, false);
+        commitDrawPointFromRaw(rawPoints[rawPoints.length - 1], true, true, false);
       } else {
         // 자유곡선 그대로(삐뚤빼뚤 유지) → 궤적을 따라 여러 점으로 커밋
         commitFreehandStroke(rawPoints);
