@@ -235,6 +235,10 @@ export default function ProjectCanvas({
   // 동시에 눌려있는 포인터(손가락) id 집합. 두 손가락째가 닿으면 그리기/드래그를
   // 즉시 취소하고 OrbitControls의 두 손가락 확대·회전 제스처에 넘겨준다.
   const activePointerIdsRef = useRef<Set<number>>(new Set());
+  // 손가락 3개로 드래그하면 화면 이동(pan). 두 손가락은 OrbitControls가
+  // 이미 확대/회전에 쓰고 있어서, 이동은 세 손가락에 배정한다.
+  const pointerPositionsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const panCentroidRef = useRef<{ x: number; y: number } | null>(null);
   const lastMouseClientRef = useRef<{ x: number; y: number } | null>(null);
   const lastPreviewDirRef = useRef<THREE.Vector3 | null>(null);
   const typedLengthRef = useRef<string>("");
@@ -1273,15 +1277,59 @@ export default function ProjectCanvas({
     }
   }
 
+  // 오빗컨트롤(OrbitControls)의 pan()과 같은 방식으로, 화면 픽셀 이동량을
+  // 카메라 시야각·거리 기준의 월드 공간 이동량으로 바꿔 타겟과 카메라
+  // 위치를 함께 옮긴다(둘을 같이 옮기면 바라보는 방향은 그대로 유지된다).
+  function panCamera(deltaXPx: number, deltaYPx: number) {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    const mount = mountRef.current;
+    if (!camera || !controls || !mount) return;
+
+    const offset = camera.position.clone().sub(controls.target);
+    const targetDistance = offset.length() * Math.tan((camera.fov / 2) * (Math.PI / 180));
+    const factor = (2 * targetDistance) / mount.clientHeight;
+
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+    const worldDelta = right
+      .multiplyScalar(-deltaXPx * factor)
+      .add(up.multiplyScalar(deltaYPx * factor));
+
+    camera.position.add(worldDelta);
+    controls.target.add(worldDelta);
+    controls.update();
+  }
+
+  function threeFingerPanCentroid(): { x: number; y: number } | null {
+    if (activePointerIdsRef.current.size !== 3) return null;
+    let sx = 0;
+    let sy = 0;
+    let n = 0;
+    for (const id of activePointerIdsRef.current) {
+      const p = pointerPositionsRef.current.get(id);
+      if (!p) return null;
+      sx += p.x;
+      sy += p.y;
+      n++;
+    }
+    if (n !== 3) return null;
+    return { x: sx / n, y: sy / n };
+  }
+
   function handlePointerCancel(e: React.PointerEvent) {
     activePointerIdsRef.current.delete(e.pointerId);
+    pointerPositionsRef.current.delete(e.pointerId);
+    if (activePointerIdsRef.current.size !== 3) panCentroidRef.current = null;
     cancelInteractionForMultiTouch();
   }
 
   function handlePointerDown(e: React.PointerEvent) {
+    pointerPositionsRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     activePointerIdsRef.current.add(e.pointerId);
+    if (activePointerIdsRef.current.size !== 3) panCentroidRef.current = null;
     if (activePointerIdsRef.current.size > 1) {
-      // 두 번째 손가락 — 그리기/드래그로 취급하지 않는다.
+      // 두 번째(이상) 손가락 — 그리기/드래그로 취급하지 않는다.
       cancelInteractionForMultiTouch();
       return;
     }
@@ -1337,8 +1385,10 @@ export default function ProjectCanvas({
 
   function handlePointerUp(e: React.PointerEvent) {
     activePointerIdsRef.current.delete(e.pointerId);
+    pointerPositionsRef.current.delete(e.pointerId);
+    if (activePointerIdsRef.current.size !== 3) panCentroidRef.current = null;
     if (activePointerIdsRef.current.size > 0) {
-      // 아직 다른 손가락이 남아있다 (핀치/회전 제스처 도중) — 그리기로 처리하지 않는다.
+      // 아직 다른 손가락이 남아있다 (핀치/회전/이동 제스처 도중) — 그리기로 처리하지 않는다.
       pointerDownRef.current = null;
       return;
     }
@@ -1396,6 +1446,26 @@ export default function ProjectCanvas({
   }
 
   function handleCanvasMove(e: React.PointerEvent) {
+    if (pointerPositionsRef.current.has(e.pointerId)) {
+      pointerPositionsRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+
+    if (activePointerIdsRef.current.size === 3) {
+      // 세 손가락 드래그 = 화면 이동. 오버뷰에서도 동작해야 하므로
+      // 스케치 모드 제한보다 먼저 처리한다.
+      const centroid = threeFingerPanCentroid();
+      if (centroid) {
+        if (panCentroidRef.current) {
+          panCamera(
+            centroid.x - panCentroidRef.current.x,
+            centroid.y - panCentroidRef.current.y
+          );
+        }
+        panCentroidRef.current = centroid;
+      }
+      return;
+    }
+
     if (mode !== "sketch") return;
     if (activePointerIdsRef.current.size > 1) return; // 두 손가락 제스처 중엔 관여하지 않는다
 
