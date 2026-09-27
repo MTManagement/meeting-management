@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MTManagement 서버 제어판</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  .card {
+    width: 100%;
+    max-width: 480px;
+    background: #1e293b;
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.sub { color: #94a3b8; font-size: 13px; margin: 0 0 20px; }
+  input {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid #334155;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-size: 14px;
+    margin-bottom: 10px;
+  }
+  button {
+    cursor: pointer;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    padding: 10px 14px;
+  }
+  .primary { background: #38bdf8; color: #0f172a; font-weight: 600; width: 100%; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 16px 0; }
+  .grid button { background: #334155; color: #e2e8f0; }
+  .grid button.build { grid-column: span 2; background: #22c55e; color: #06280f; font-weight: 600; }
+  .grid button.kill { background: #ef4444; color: #2b0505; }
+  .status-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .badge { padding: 3px 10px; border-radius: 999px; font-size: 12px; background: #334155; }
+  .badge.running { background: #14532d; color: #86efac; }
+  .badge.exited, .badge.not_found { background: #450a0a; color: #fca5a5; }
+  pre {
+    background: #0f172a;
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 12px;
+    height: 220px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    border: 1px solid #334155;
+  }
+  .error { color: #fca5a5; font-size: 13px; margin: 0 0 10px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<div class="card" id="login-card">
+  <h1>MTManagement 서버 제어판</h1>
+  <p class="sub">비밀번호를 입력해 로그인하세요.</p>
+  <p class="error hidden" id="login-error"></p>
+  <input type="password" id="password" placeholder="비밀번호" />
+  <button class="primary" id="login-btn">로그인</button>
+</div>
+
+<div class="card hidden" id="panel-card" style="max-width: 600px;">
+  <h1>MTManagement 서버 제어판</h1>
+  <p class="sub">mtmanagement-server 컨테이너 제어</p>
+
+  <div class="status-row">
+    <span>현재 상태</span>
+    <span class="badge" id="status-badge">확인 중...</span>
+  </div>
+
+  <div class="grid">
+    <button id="start-btn">시작</button>
+    <button id="stop-btn">중지</button>
+    <button class="kill" id="kill-btn">강제 중지</button>
+    <button id="restart-btn">재시작</button>
+    <button class="build" id="build-btn">수동 빌드/배포</button>
+  </div>
+
+  <pre id="log-view">로그가 여기 표시됩니다.</pre>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let token = localStorage.getItem("mtm_token") || null;
+  let pollTimer = null;
+
+  function showPanel() {
+    $("login-card").classList.add("hidden");
+    $("panel-card").classList.remove("hidden");
+    refreshStatus();
+    pollTimer = setInterval(() => {
+      refreshStatus();
+      refreshLogs();
+    }, 3000);
+  }
+
+  async function authFetch(url, opts = {}) {
+    const res = await fetch(url, {
+      ...opts,
+      headers: {
+        ...(opts.headers || {}),
+        Authorization: "Bearer " + token,
+      },
+    });
+    if (res.status === 401) {
+      localStorage.removeItem("mtm_token");
+      token = null;
+      clearInterval(pollTimer);
+      $("panel-card").classList.add("hidden");
+      $("login-card").classList.remove("hidden");
+      throw new Error("인증 만료");
+    }
+    return res;
+  }
+
+  async function refreshStatus() {
+    try {
+      const res = await authFetch("/api/status");
+      const data = await res.json();
+      const badge = $("status-badge");
+      badge.textContent = data.status;
+      badge.className = "badge " + data.status;
+    } catch {}
+  }
+
+  async function refreshLogs() {
+    try {
+      const res = await authFetch("/api/logs");
+      const data = await res.json();
+      const view = $("log-view");
+      view.textContent = data.log || "로그가 없습니다.";
+      view.scrollTop = view.scrollHeight;
+    } catch {}
+  }
+
+  async function callAction(action) {
+    try {
+      await authFetch(`/api/${action}`, { method: "POST" });
+      setTimeout(refreshStatus, 1000);
+      if (action === "build") refreshLogs();
+    } catch {}
+  }
+
+  $("login-btn").addEventListener("click", async () => {
+    const password = $("password").value;
+    const errEl = $("login-error");
+    errEl.classList.add("hidden");
+    try {
+      const res = await fetch("/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "로그인 실패");
+      token = data.token;
+      localStorage.setItem("mtm_token", token);
+      showPanel();
+    } catch (e) {
+      errEl.textContent = e.message;
+      errEl.classList.remove("hidden");
+    }
+  });
+
+  $("password").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("login-btn").click();
+  });
+
+  $("start-btn").addEventListener("click", () => callAction("start"));
+  $("stop-btn").addEventListener("click", () => callAction("stop"));
+  $("kill-btn").addEventListener("click", () => callAction("kill"));
+  $("restart-btn").addEventListener("click", () => callAction("restart"));
+  $("build-btn").addEventListener("click", () => callAction("build"));
+
+  if (token) showPanel();
+</script>
+
+</body>
+</html>

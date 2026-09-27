@@ -12,130 +12,118 @@ datasource db {
 
 // 로그인 계정 (현재는 게스트/닉네임 로그인, 추후 카카오·구글 연동 예정)
 model User {
-  id                 String              @id @default(cuid())
-  name               String
-  createdAt          DateTime            @default(now())
-  members            Member[]
-  membershipRequests MembershipRequest[]
+  id        String    @id @default(cuid())
+  name      String
+  createdAt DateTime  @default(now())
+  projects  Project[]
 }
 
-// 모임
-model Club {
-  id                 String              @id @default(cuid())
-  name               String              @unique
-  description        String?
-  createdAt          DateTime            @default(now())
-  members            Member[]
-  events             Event[]
-  boards             Board[]
-  membershipRequests MembershipRequest[]
-}
-
-// 특정 모임에 속한 회원(가입 정보). userId가 있으면 실제 로그인 계정과 연결된 것,
-// 없으면 총무가 계정 없이 수동으로 등록해둔 회원.
-// role: 회장/총무 등 표시용 직책(자유 텍스트)
-// grade: 권한 등급 - "MAIN_ADMIN" | "ADMIN" | "MEMBER"
-model Member {
-  id           String        @id @default(cuid())
-  clubId       String
-  club         Club          @relation(fields: [clubId], references: [id], onDelete: Cascade)
-  userId       String?
-  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
-  name         String
-  role         String
-  grade        String        @default("MEMBER")
-  phone        String
-  createdAt    DateTime      @default(now())
-  duesPayments DuesPayment[]
-  attendances  Attendance[]
-}
-
-// 모임 가입 신청 (승인제). status: "PENDING" | "APPROVED" | "REJECTED"
-model MembershipRequest {
-  id        String   @id @default(cuid())
-  clubId    String
-  club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  status    String   @default("PENDING")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@unique([clubId, userId])
-}
-
-// periodType: "YEARLY" | "HALF" | "QUARTER" | "MONTH" | "WEEK"
-// periodIndex: YEARLY=1 / HALF=1~2 / QUARTER=1~4 / MONTH=1~12 / WEEK=1~53
-model DuesPayment {
+// 스케치 프로젝트 (인테리어 공간 하나 = 프로젝트 하나)
+model Project {
   id          String   @id @default(cuid())
-  memberId    String
-  member      Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
-  year        Int
-  periodType  String
-  periodIndex Int
-  paid        Boolean  @default(false)
+  name        String
+  description String?
+  ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  @@unique([memberId, year, periodType, periodIndex])
+  planes   Plane[]
+  sketches Sketch[]
+  points   Point[]
+  edges    Edge[]
+  groups   Group[]
 }
 
-model Event {
-  id           String       @id @default(cuid())
-  clubId       String
-  club         Club         @relation(fields: [clubId], references: [id], onDelete: Cascade)
-  title        String
-  date         DateTime
-  location     String?
-  address      String?
-  fee          String?
-  maxAttendees Int?
-  description  String?
-  createdAt    DateTime     @default(now())
-  attendances  Attendance[]
-}
-
-// status: "참석" | "불참" | "미정"
-model Attendance {
+// 평면. 기준평면(XY/YZ/XZ), 오프셋 평면, 선의 끝점에서 그 선에 수직으로 만든
+// 평면을 모두 origin(mm) + normal(법선, 단위벡터) + uAxis(평면 내 가로 기준
+// 방향, 단위벡터)로 표현한다. vAxis(세로 방향)는 normal × uAxis로 계산한다.
+// 기준평면이 아닌 이상 전역 축에 반드시 정렬되어 있을 필요는 없다.
+model Plane {
   id        String   @id @default(cuid())
-  eventId   String
-  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  memberId  String
-  member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
-  status    String   @default("미정")
-  updatedAt DateTime @updatedAt
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  label     String
+  originX   Float
+  originY   Float
+  originZ   Float
+  normalX   Float
+  normalY   Float
+  normalZ   Float
+  uAxisX    Float
+  uAxisY    Float
+  uAxisZ    Float
+  createdAt DateTime @default(now())
 
-  @@unique([eventId, memberId])
+  sketches Sketch[]
 }
 
-// type: "공지" | "자유"
-model Board {
-  id              String   @id @default(cuid())
-  clubId          String
-  club            Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
-  name            String
-  type            String
-  allowMemberPost Boolean  @default(true)
-  anonymous       Boolean  @default(false)
-  createdAt       DateTime @default(now())
-  posts           Post[]
+// 평면 하나에 종속된 스케치(선 그리기) 단위. 트리에서 평면의 자식으로 표시된다.
+model Sketch {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  // 평면 없는 스케치 = 오버뷰에서 여러 스케치의 점을 잇는 3D 연결선 모음
+  planeId   String?
+  plane     Plane?   @relation(fields: [planeId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now())
+
+  points Point[]
+  edges  Edge[]
 }
 
-model Post {
-  id         String    @id @default(cuid())
-  boardId    String
-  board      Board     @relation(fields: [boardId], references: [id], onDelete: Cascade)
-  title      String
-  content    String
-  authorName String
-  createdAt  DateTime  @default(now())
-  comments   Comment[]
+// 와이어프레임의 점. 항상 월드 좌표(x,y,z, 단위 mm)로 저장한다.
+// 면(Face)은 만들지 않는다 — 점과 선만으로 구조를 표현한다.
+model Point {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sketchId  String
+  sketch    Sketch   @relation(fields: [sketchId], references: [id], onDelete: Cascade)
+  x         Float
+  y         Float
+  z         Float
+  // 자유곡선(손그림)을 잘게 쪼갠 중간 보간점은 false. 화면에 점(구슬)으로
+  // 안 보이고 선 모양만 유지하는 용도로 존재한다. 진짜 꼭짓점(탭으로
+  // 찍었거나 스트로크 시작/끝점)은 true.
+  isVertex  Boolean  @default(true)
+  groupId   String?
+  group     Group?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now())
+
+  edgesFrom Edge[] @relation("EdgeFrom")
+  edgesTo   Edge[] @relation("EdgeTo")
 }
 
-model Comment {
-  id         String   @id @default(cuid())
-  postId     String
-  post       Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
-  content    String
-  authorName String
-  createdAt  DateTime @default(now())
+// 점과 점을 잇는 선.
+model Edge {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sketchId  String
+  sketch    Sketch   @relation(fields: [sketchId], references: [id], onDelete: Cascade)
+  fromId    String
+  from      Point    @relation("EdgeFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  toId      String
+  to        Point    @relation("EdgeTo", fields: [toId], references: [id], onDelete: Cascade)
+  // 한 번에 그은 선(획) 단위 묶음. 같은 strokeId끼리 한 개체로 선택·삭제된다.
+  strokeId  String?
+  groupId   String?
+  group     Group?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now())
+}
+
+// 점+선 묶음 (가구 하나, 벽 하나 등). 그룹째로 이동·회전·스케일하고,
+// 그룹 단위로 IGS 파일을 저장·불러올 수 있다. transform은 그룹 원점 기준 변환값.
+model Group {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name      String
+  transform Json     @default("{}")
+  createdAt DateTime @default(now())
+
+  points Point[]
+  edges  Edge[]
 }
