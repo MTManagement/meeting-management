@@ -873,9 +873,19 @@ export default function ProjectCanvas({
     return hit ? target : null;
   }
 
-  function findNearbyActivePoint(pos: THREE.Vector3): string | null {
+  // 탭/직선 끝점은 손가락으로 "도형 닫기"를 정확히 못 짚어도 붙게
+  // 반경을 넉넉히(180mm) 잡는다. 자유곡선 내부 점은 훨씬 촘촘하게
+  // 샘플링되므로 같은 반경을 쓰면 곡선이 자기 자신과 계속 병합돼서
+  // 각지게 보인다 — 그래서 자유곡선 구간에는 훨씬 좁은 반경(3mm)을 쓴다.
+  const NEARBY_POINT_THRESHOLD = 0.18; // scene 단위 ≈ 180mm
+  const FREEHAND_NEARBY_THRESHOLD = 0.003; // scene 단위 ≈ 3mm
+
+  function findNearbyActivePoint(
+    pos: THREE.Vector3,
+    threshold = NEARBY_POINT_THRESHOLD
+  ): string | null {
     let best: string | null = null;
-    let bestDist = 0.18;
+    let bestDist = threshold;
     for (const [id, p] of activePointsRef.current) {
       const d = pos.distanceTo(vecMm(p));
       if (d < bestDist) {
@@ -892,8 +902,13 @@ export default function ProjectCanvas({
   // 30mm 단위 조각마다 치수가 다 뜨면 지저분하므로, 진짜 직선을 그을 때만 보여준다).
   // showPoint=false면 점(구슬) 표시를 안 한다 (자유곡선 중간 보간점용 —
   // 궤적을 부드럽게 유지하기 위한 점일 뿐, 실제 꼭짓점처럼 보이면 안 되므로).
-  function commitDrawPoint(target: THREE.Vector3, showLabel = true, showPoint = true) {
-    let pointId = findNearbyActivePoint(target);
+  function commitDrawPoint(
+    target: THREE.Vector3,
+    showLabel = true,
+    showPoint = true,
+    nearbyThreshold = NEARBY_POINT_THRESHOLD
+  ) {
+    let pointId = findNearbyActivePoint(target, nearbyThreshold);
     if (!pointId) {
       pointId = `tmp_${crypto.randomUUID()}`;
       const rec: PointRec = {
@@ -929,24 +944,27 @@ export default function ProjectCanvas({
     raw: THREE.Vector3,
     snap = true,
     showLabel = true,
-    showPoint = true
+    showPoint = true,
+    nearbyThreshold = NEARBY_POINT_THRESHOLD
   ) {
-    const nearbyId = findNearbyActivePoint(raw);
+    const nearbyId = findNearbyActivePoint(raw, nearbyThreshold);
     const target = nearbyId
       ? vecMm(activePointsRef.current.get(nearbyId)!)
       : snap
         ? applyOrthoSnap(applySnap(raw))
         : raw;
-    commitDrawPoint(target, showLabel, showPoint);
+    commitDrawPoint(target, showLabel, showPoint, nearbyThreshold);
   }
 
   // 자유곡선 그대로 그린 궤적을 여러 짧은 직선(점 여러 개)으로 커밋한다.
-  // 궤적의 모든 점을 다 쓰면 너무 촘촘하므로 일정 거리 이상 떨어진
-  // 점만 남기고, 중간 점들은 스냅을 걸지 않아 손그림 느낌을 유지한다.
-  // 조각마다 치수 라벨이 뜨면 지저분하니 자유곡선 구간에는 라벨을 안 붙인다
+  // 1mm 이상 떨어진 점만 남겨서 곡선의 세밀한 모양을 최대한 유지한다.
+  // "근처 점에 붙는" 반경도 3mm로 훨씬 좁게 써서, 구불구불한 곡선이
+  // 자기 자신과 가까워지는 구간(예: S자)에서 엉뚱하게 이전 점에
+  // 달라붙어 각지게 보이는 문제를 막는다 (탭/직선 닫기용 180mm 반경과는
+  // 별개). 조각마다 치수 라벨이 뜨면 지저분하니 라벨도 안 붙인다
   // (치수는 실제로 "직선으로" 그은 선에만 표시된다). 점도 하나도 안
   // 보여준다(시작/끝점 포함) — 손그림 느낌에는 점이 어울리지 않는다.
-  const FREEHAND_MIN_DIST = 0.03; // scene 단위 ≈ 30mm
+  const FREEHAND_MIN_DIST = 0.001; // scene 단위 ≈ 1mm
   function commitFreehandStroke(rawPoints: THREE.Vector3[]) {
     if (rawPoints.length === 0) return;
     const simplified = [rawPoints[0]];
@@ -957,7 +975,9 @@ export default function ProjectCanvas({
     }
     const last = rawPoints[rawPoints.length - 1];
     if (simplified[simplified.length - 1] !== last) simplified.push(last);
-    for (const p of simplified) commitDrawPointFromRaw(p, false, false, false);
+    for (const p of simplified) {
+      commitDrawPointFromRaw(p, false, false, false, FREEHAND_NEARBY_THRESHOLD);
+    }
   }
 
   function handleDrawClick(clientX: number, clientY: number) {
