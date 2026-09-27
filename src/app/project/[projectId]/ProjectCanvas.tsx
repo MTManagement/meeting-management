@@ -537,7 +537,7 @@ export default function ProjectCanvas({
 
     // ── 월드 원점(0,0,0) 방향 축 — 화면 고정 위젯이 아니라 실제 3D
     // 공간의 원점에 놓여서, 카메라를 돌리면 다른 지오메트리처럼 같이 돈다.
-    const AXIS_LEN = mmToScene(500);
+    const AXIS_LEN = mmToScene(200);
     const axisDefs: { dir: THREE.Vector3; color: number; label: string }[] = [
       { dir: new THREE.Vector3(1, 0, 0), color: 0xd9534f, label: "X" },
       { dir: new THREE.Vector3(0, 1, 0), color: 0x4caf50, label: "Y" },
@@ -1166,15 +1166,18 @@ export default function ProjectCanvas({
   }
 
   async function handleConnectTap(clientX: number, clientY: number) {
+    const from = connectFrom;
     const hit = pickScreenPoint(clientX, clientY);
     if (!hit) {
-      // 빈 곳을 탭하면 지금 잇던 선을 끊는다
+      // 점이 아닌 곳을 탭하면 잇던 시작점은 취소하고, 선 위라면 그 선을 선택한다
+      // (선 잇기를 켜둔 채로도 선택·지우기가 되게).
       setConnectFrom(null);
       clearConnectPreview();
+      if (!from) handleOverviewClick(clientX, clientY, false);
       return;
     }
-    const from = connectFrom;
     if (!from) {
+      setSelectedEdge(null);
       setConnectFrom(hit);
       return;
     }
@@ -1204,9 +1207,31 @@ export default function ProjectCanvas({
     const fromId = findOrAdd(from);
     const toId = findOrAdd(hit);
     edges.push({ id: `tmp_${crypto.randomUUID()}`, fromId, toId, strokeId: crypto.randomUUID() });
+    pushOverviewUndo(sketchId, base?.points ?? [], base?.edges ?? []);
     setSketchOverride(sketchId, points, edges);
     queueSave(sketchId, points, edges);
-    setConnectFrom(hit); // 이어서 다음 점을 탭하면 계속 이어진다
+    // 스케치의 기본 그리기처럼 선 하나씩: 두 점을 이으면 끝, 다음 선은 새로 시작
+    setConnectFrom(null);
+    clearConnectPreview();
+  }
+
+  // 오버뷰에서 한 동작(선 잇기, 선 지우기)의 직전 상태를 저장해뒀다가
+  // 실행 취소 시 그 스케치를 통째로 되돌린다.
+  const overviewUndoRef = useRef<{ sketchId: string; points: PointRec[]; edges: EdgeRec[] }[]>([]);
+  const [overviewUndoCount, setOverviewUndoCount] = useState(0);
+  function pushOverviewUndo(sketchId: string, points: PointRec[], edges: EdgeRec[]) {
+    overviewUndoRef.current.push({ sketchId, points: [...points], edges: [...edges] });
+    if (overviewUndoRef.current.length > UNDO_STACK_LIMIT) overviewUndoRef.current.shift();
+    setOverviewUndoCount(overviewUndoRef.current.length);
+  }
+  function handleOverviewUndo() {
+    const snap = overviewUndoRef.current.pop();
+    setOverviewUndoCount(overviewUndoRef.current.length);
+    if (!snap) return;
+    setSketchOverride(snap.sketchId, snap.points, snap.edges);
+    queueSave(snap.sketchId, snap.points, snap.edges);
+    setSelectedEdge(null);
+    setConnectFrom(null);
     clearConnectPreview();
   }
 
@@ -1223,13 +1248,14 @@ export default function ProjectCanvas({
       sk.edges.filter((e) => strokeKeyOf(e) === key).flatMap((e) => [e.fromId, e.toId])
     );
     const points = sk.points.filter((p) => used.has(p.id) || !removedEnds.has(p.id));
+    pushOverviewUndo(sketchId, sk.points, sk.edges);
     setSketchOverride(sketchId, points, edges);
     queueSave(sketchId, points, edges);
     setSelectedEdge(null);
   }
 
   // ── 오버뷰 모드: 평면 카드/선 클릭으로 선택 ────────────────────
-  function handleOverviewClick(clientX: number, clientY: number) {
+  function handleOverviewClick(clientX: number, clientY: number, allowPlane = true) {
     const mount = mountRef.current;
     const camera = cameraRef.current;
     if (!mount || !camera) return;
@@ -1256,8 +1282,13 @@ export default function ProjectCanvas({
       setSelectedEdge(null);
       return;
     }
-    const obj = hits[0].object;
+    // 선이 평면 카드 위를 지나가도 선이 먼저 선택되게 한다
+    // (카드가 먼저 잡히면 선 대신 새 스케치가 만들어져 버렸다).
+    const edgeHit = hits.find((h) => h.object.userData.kind === "edge");
+    const obj = (edgeHit ?? hits[0]).object;
     if (obj.userData.kind === "plane") {
+      setSelectedEdge(null);
+      if (!allowPlane) return;
       const plane = planes.find((p) => p.id === obj.userData.planeId);
       if (plane && !busy) handleQuickDrawOnPlane(plane);
     } else if (obj.userData.kind === "edge") {
@@ -1996,7 +2027,27 @@ export default function ProjectCanvas({
       // 치수 라벨 편집창 등 다른 입력창에 타이핑 중이면 관여하지 않는다.
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
-      if (mode !== "sketch") return;
+
+      const isUndo = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z";
+      if (mode !== "sketch") {
+        if (isUndo) {
+          e.preventDefault();
+          handleOverviewUndo();
+        } else if (e.key === "Escape") {
+          setConnectFrom(null);
+          clearConnectPreview();
+          setSelectedEdge(null);
+        } else if ((e.key === "Delete" || e.key === "Backspace") && selectedEdge) {
+          e.preventDefault();
+          deleteStrokeInSketch(selectedEdge.sketchId, selectedEdge.edgeId);
+        }
+        return;
+      }
+      if (isUndo) {
+        e.preventDefault();
+        handleUndo();
+        return;
+      }
 
       if (e.key === "Escape") {
         handleNewStroke();
@@ -2013,7 +2064,7 @@ export default function ProjectCanvas({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, tool, selectedPointId, selectedActiveEdgeId]);
+  }, [mode, tool, selectedPointId, selectedActiveEdgeId, selectedEdge, sketchOverrides, freeSketch]);
 
   function handleClearAll() {
     if (!confirm("현재 스케치의 모든 점과 선을 지울까요? (실행 취소로 되돌릴 수 있습니다)")) return;
@@ -2165,7 +2216,7 @@ export default function ProjectCanvas({
         <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 border-b border-black/10 bg-[#faf6ee]/90 backdrop-blur-sm">
           {mode === "overview" ? (
             <>
-              <div className="flex items-center gap-1 mr-auto">
+              <div className="flex items-center gap-1">
                 <select
                   value={offsetAxis}
                   onChange={(e) => setOffsetAxis(e.target.value as Axis)}
@@ -2206,6 +2257,14 @@ export default function ProjectCanvas({
                   title="서로 다른 스케치의 점(선 끝점 등)을 차례로 탭해서 3D 선으로 잇습니다"
                 >
                   {connectMode ? "✎ 선 잇는 중 (끄기)" : "선 잇기"}
+                </button>
+                <button
+                  onClick={handleOverviewUndo}
+                  disabled={overviewUndoCount === 0}
+                  className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600 disabled:opacity-40"
+                  title="오버뷰에서 한 선 잇기/지우기를 되돌립니다 (Ctrl+Z)"
+                >
+                  실행 취소
                 </button>
               </div>
 
@@ -2455,8 +2514,8 @@ export default function ProjectCanvas({
             <span>
               {connectMode
                 ? connectFrom
-                  ? "이을 다음 점을 탭하세요 (빈 곳을 탭하면 끊기)"
-                  : "잇기 시작할 점(선 끝점 등)을 탭하세요"
+                  ? "이을 끝점을 탭하세요 (빈 곳 탭 또는 Esc로 취소)"
+                  : "시작할 점(선 끝점 등)을 탭하세요 · 선을 탭하면 선택"
                 : "평면을 탭하면 새 스케치, 선을 탭하면 선택됩니다."}
             </span>
           )}
