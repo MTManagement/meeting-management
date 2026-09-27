@@ -183,6 +183,36 @@ function createLabelDiv(text: string) {
   return div;
 }
 
+// 치수 라벨은 선 바로 위에 얹지 않고 살짝 옆에 띄운다: 가로선이면 위쪽, 세로선이면 오른쪽.
+// CSS2DRenderer가 바깥 div의 transform을 매 프레임 덮어쓰므로 안쪽 div를 옮긴다.
+// %는 라벨 자기 크기 기준이라 글자 길이와 상관없이 선에서 같은 간격만큼 떨어진다.
+const LABEL_ABOVE = "translate(0, calc(-50% - 5px))";
+const LABEL_RIGHT = "translate(calc(50% + 6px), 0)";
+function dimLabelOffset(plane: PlaneData | null, a: THREE.Vector3, b: THREE.Vector3) {
+  if (!plane) return LABEL_ABOVE;
+  const ua = toLocalUV(plane, a);
+  const ub = toLocalUV(plane, b);
+  return Math.abs(ub.u - ua.u) >= Math.abs(ub.v - ua.v) ? LABEL_ABOVE : LABEL_RIGHT;
+}
+function wrapLabel(inner: HTMLElement, offset: string) {
+  const outer = document.createElement("div");
+  inner.style.transform = offset;
+  outer.appendChild(inner);
+  return outer;
+}
+function labelInner(obj: CSS2DObject) {
+  return obj.element.firstChild as HTMLElement | null;
+}
+
+// 지우개 커서: 밝은 종이 위에서도 잘 보이게 흰 테두리를 두른 검은 원(선을 고르는 범위와 비슷한 크기).
+const ERASER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
+  "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'>" +
+    "<circle cx='12' cy='12' r='9' fill='none' stroke='white' stroke-width='3.5'/>" +
+    "<circle cx='12' cy='12' r='9' fill='none' stroke='black' stroke-width='1.6'/>" +
+    "<circle cx='12' cy='12' r='1.6' fill='black' stroke='white' stroke-width='0.8'/>" +
+    "</svg>"
+)}") 12 12, crosshair`;
+
 // 치수 라벨을 클릭하면 숫자를 직접 입력해서 길이를 바꿀 수 있게 만든다
 // (from 점은 고정, to 점이 새 길이에 맞게 같은 방향으로 이동).
 function createEditableLabelDiv(
@@ -911,7 +941,7 @@ export default function ProjectCanvas({
   });
   const shapePreviewRef = useRef<THREE.LineLoop | null>(null);
   const shapePreviewLabelsRef = useRef<CSS2DObject[]>([]);
-  const activeShapeLabelsRef = useRef<Map<string, CSS2DObject>>(new Map()); // 원 지름 라벨
+  const activeShapeLabelsRef = useRef<Map<string, THREE.Group>>(new Map()); // 원: 중심점·지름 보조선·Ø 라벨
   const snapMarkerRef = useRef<THREE.Points | null>(null);
   const snapLabelRef = useRef<CSS2DObject | null>(null);
   const lastPointerTypeRef = useRef<string>("mouse");
@@ -1177,6 +1207,9 @@ export default function ProjectCanvas({
           child.material.resolution.copy(lineResolutionRef.current);
         }
       }
+      // setSize가 캔버스를 비우므로 다음 프레임까지 빈 화면이 보이지 않게 바로 다시 그린다
+      renderer.render(scene, camera);
+      labelRenderer.render(scene, camera);
     };
     // 창 크기뿐 아니라 도구 막대가 두 줄로 늘어나 캔버스 높이가 바뀔 때도 맞춘다
     // (안 맞추면 화면이 늘어져 보이고 탭 위치와 선택 위치가 어긋난다).
@@ -1318,7 +1351,7 @@ export default function ProjectCanvas({
     const labelDiv = createEditableLabelDiv(`${distanceMm(from, to)}mm`, (mm) =>
       applyEdgeLength(e.id, mm)
     );
-    const label = new CSS2DObject(labelDiv);
+    const label = new CSS2DObject(wrapLabel(labelDiv, dimLabelOffset(activePlane, vecMm(from), vecMm(to))));
     label.position.copy(vecMm(from).add(vecMm(to)).multiplyScalar(0.5));
     activeLabelGroupRef.current?.add(label);
     activeEdgeLabelsRef.current.set(e.id, label);
@@ -1383,9 +1416,11 @@ export default function ProjectCanvas({
       }
 
       const label = activeEdgeLabelsRef.current.get(edgeId);
-      if (label) {
+      const inner = label && labelInner(label);
+      if (label && inner) {
         label.position.copy(vecMm(from).add(vecMm(to)).multiplyScalar(0.5));
-        label.element.textContent = `${distanceMm(from, to)}mm`;
+        inner.style.transform = dimLabelOffset(activePlane, vecMm(from), vecMm(to));
+        inner.textContent = `${distanceMm(from, to)}mm`;
       }
     }
   }
@@ -1475,10 +1510,20 @@ export default function ProjectCanvas({
     dirtyRef.current = true;
   }
   function clearShapeLabels() {
-    for (const l of activeShapeLabelsRef.current.values()) activeLabelGroupRef.current?.remove(l);
+    for (const g of activeShapeLabelsRef.current.values()) {
+      for (const child of [...g.children]) {
+        g.remove(child); // CSS2DObject는 직접 remove해야 DOM도 사라진다
+        if (child instanceof THREE.Points || child instanceof THREE.Line) {
+          child.geometry.dispose();
+          (child.material as THREE.Material).dispose();
+        }
+      }
+      activeLabelGroupRef.current?.remove(g);
+    }
     activeShapeLabelsRef.current.clear();
   }
-  // 원마다 지름 라벨(Ø)을 하나씩 붙인다. 원을 이루는 72개 조각에는 치수를 안 붙인다.
+  // 원마다 중심점 + 중심을 지나는 지름 보조선(점선) + 그 위의 지름 치수(Ø)를 붙인다.
+  // 원을 이루는 72개 조각에는 치수를 안 붙인다. 셋을 한 그룹으로 묶어서 원을 끌면 같이 움직인다.
   function rebuildShapeLabels(plane: PlaneData | null = activePlane) {
     clearShapeLabels();
     if (!plane) return;
@@ -1487,13 +1532,37 @@ export default function ProjectCanvas({
       if (!key.startsWith(CIRCLE_PREFIX)) continue;
       const info = circleInfo(edges, activePointsRef.current);
       if (!info) continue;
+      const r = mmToScene(info.radiusMm);
+      const group = new THREE.Group();
+      group.position.copy(vecMm(info.center));
+
+      group.add(makeDot(new THREE.Vector3(), PENCIL, DOT_PX));
+
+      const guide = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([
+          uAxis.clone().multiplyScalar(-r),
+          uAxis.clone().multiplyScalar(r),
+        ]),
+        new THREE.LineDashedMaterial({
+          color: PENCIL,
+          dashSize: Math.max(r / 12, 0.002),
+          gapSize: Math.max(r / 20, 0.0015),
+          transparent: true,
+          opacity: 0.75,
+        })
+      );
+      guide.computeLineDistances();
+      group.add(guide);
+
       const div = createEditableLabelDiv(`Ø${Math.round(info.radiusMm * 2)}mm`, (mm) =>
         applyCircleDiameter(key, mm)
       );
-      const label = new CSS2DObject(div);
-      label.position.copy(vecMm(info.center).add(uAxis.clone().multiplyScalar(mmToScene(info.radiusMm))));
-      activeLabelGroupRef.current?.add(label);
-      activeShapeLabelsRef.current.set(key, label);
+      const label = new CSS2DObject(wrapLabel(div, LABEL_ABOVE));
+      label.position.copy(uAxis.clone().multiplyScalar(r / 2));
+      group.add(label);
+
+      activeLabelGroupRef.current?.add(group);
+      activeShapeLabelsRef.current.set(key, group);
     }
   }
 
@@ -2416,6 +2485,37 @@ export default function ProjectCanvas({
       const b = points.get(e.toId);
       if (a && b) consider(vecMm(a).add(vecMm(b)).multiplyScalar(0.5), "mid");
     }
+    // 교차점: 커서 근처를 지나는 선들끼리만 계산한다(자유곡선·원이 조각이 많아도 가볍게).
+    // 끝점을 공유하는 이웃 조각은 교차가 아니라 이어진 것이므로 뺀다(그 자리는 끝점 스냅이 맡음).
+    const near: { a: THREE.Vector3; b: THREE.Vector3; e?: EdgeRec }[] = [];
+    for (const e of edges) {
+      if (skipEdge(e)) continue;
+      const a = points.get(e.fromId);
+      const b = points.get(e.toId);
+      if (!a || !b) continue;
+      const av = vecMm(a);
+      const bv = vecMm(b);
+      if (raw.distanceTo(closestPointOnSegment(raw, av, bv)) < th) near.push({ a: av, b: bv, e });
+    }
+    for (const [a, b] of otherSnapRefs?.segs ?? []) {
+      if (raw.distanceTo(closestPointOnSegment(raw, a, b)) < th) near.push({ a, b });
+    }
+    const nearUV = near.map((s) => [toLocalUV(activePlane, s.a), toLocalUV(activePlane, s.b)] as const);
+    for (let i = 0; i < near.length; i++) {
+      for (let j = i + 1; j < near.length; j++) {
+        const e1 = near[i].e;
+        const e2 = near[j].e;
+        if (
+          e1 &&
+          e2 &&
+          (e1.fromId === e2.fromId || e1.fromId === e2.toId || e1.toId === e2.fromId || e1.toId === e2.toId)
+        ) {
+          continue;
+        }
+        const t = segCrossT(nearUV[i][0], nearUV[i][1], nearUV[j][0], nearUV[j][1], 0);
+        if (t !== null) consider(near[i].a.clone().lerp(near[i].b, t), "cross");
+      }
+    }
     for (const r of otherSnapRefs?.points ?? []) consider(r.pos, r.kind);
     if (acc.best) return acc.best;
 
@@ -2612,7 +2712,8 @@ export default function ProjectCanvas({
     const lengthMm = hasTyped ? Math.round(typed) : sceneToMm(fromVec.distanceTo(target));
     setPreviewLabel(
       fromVec.clone().add(target).multiplyScalar(0.5),
-      hasTyped ? `${lengthMm}mm ▎키보드 입력 중 (Enter)` : `${lengthMm}mm`
+      hasTyped ? `${lengthMm}mm ▎키보드 입력 중 (Enter)` : `${lengthMm}mm`,
+      dimLabelOffset(activePlane, fromVec, target)
     );
   }
   function setPreviewLine(a: THREE.Vector3, b: THREE.Vector3) {
@@ -2634,14 +2735,18 @@ export default function ProjectCanvas({
     }
     previewLineRef.current.computeLineDistances();
   }
-  function setPreviewLabel(pos: THREE.Vector3, text: string) {
+  function setPreviewLabel(pos: THREE.Vector3, text: string, offset = LABEL_ABOVE) {
     if (!previewLabelRef.current) {
-      const label = new CSS2DObject(createLabelDiv(""));
+      const label = new CSS2DObject(wrapLabel(createLabelDiv(""), offset));
       previewGroupRef.current?.add(label);
       previewLabelRef.current = label;
     }
     previewLabelRef.current.position.copy(pos);
-    previewLabelRef.current.element.textContent = text;
+    const inner = labelInner(previewLabelRef.current);
+    if (inner) {
+      inner.textContent = text;
+      inner.style.transform = offset;
+    }
   }
   function hidePreviewLine() {
     if (previewLineRef.current) {
@@ -2696,7 +2801,11 @@ export default function ProjectCanvas({
       const start = resolveTarget(pts[0]).pos;
       const end = resolveTarget(pts[pts.length - 1], { ortho: true, orthoRef: start }).pos;
       renderPts = [start, end];
-      setPreviewLabel(start.clone().add(end).multiplyScalar(0.5), `${sceneToMm(start.distanceTo(end))}mm`);
+      setPreviewLabel(
+        start.clone().add(end).multiplyScalar(0.5),
+        `${sceneToMm(start.distanceTo(end))}mm`,
+        dimLabelOffset(activePlane, start, end)
+      );
     }
     if (!freehandLineRef.current) {
       const geo = new THREE.BufferGeometry().setFromPoints(renderPts);
@@ -2800,22 +2909,25 @@ export default function ProjectCanvas({
 
     const dims = shapeDimsRef.current;
     const mark = (field: 0 | 1, has: boolean) => (dims.field === field && has ? " ▎" : "");
-    const labels: { pos: THREE.Vector3; text: string }[] =
+    const labels: { pos: THREE.Vector3; text: string; offset: string }[] =
       g.kind === "rect"
         ? [
             {
               pos: g.corners[0].clone().add(g.corners[1]).multiplyScalar(0.5),
               text: `가로 ${g.wMm}mm${mark(0, !!dims.a)}`,
+              offset: LABEL_ABOVE,
             },
             {
               pos: g.corners[1].clone().add(g.corners[2]).multiplyScalar(0.5),
               text: `세로 ${g.hMm}mm${mark(1, !!dims.b)}`,
+              offset: LABEL_RIGHT,
             },
           ]
         : [
             {
-              pos: g.points[0].clone(),
+              pos: g.center.clone().lerp(g.points[0], 0.5),
               text: `Ø${g.dMm}mm${dims.a ? " ▎" : ""}`,
+              offset: LABEL_ABOVE,
             },
           ];
     while (shapePreviewLabelsRef.current.length > labels.length) {
@@ -2824,12 +2936,16 @@ export default function ProjectCanvas({
     labels.forEach((l, i) => {
       let obj = shapePreviewLabelsRef.current[i];
       if (!obj) {
-        obj = new CSS2DObject(createLabelDiv(""));
+        obj = new CSS2DObject(wrapLabel(createLabelDiv(""), l.offset));
         previewGroupRef.current?.add(obj);
         shapePreviewLabelsRef.current[i] = obj;
       }
       obj.position.copy(l.pos);
-      obj.element.textContent = l.text;
+      const inner = labelInner(obj);
+      if (inner) {
+        inner.textContent = l.text;
+        inner.style.transform = l.offset;
+      }
     });
   }
   function hideShapePreview() {
@@ -3821,10 +3937,25 @@ export default function ProjectCanvas({
 
   const selectedPlane = planes.find((p) => p.id === selectedPlaneId) ?? null;
 
-  // 좌측 트리 — 캔버스 영역 위에 떠 있는 CATIA식 연결선 트리. 도구 막대·상태줄 아래에
-  // 붙어 있어서 도구 막대가 두 줄로 늘어나도 글씨와 겹치지 않는다.
+  // 캔버스는 화면 전체에 고정하고 도구 막대·상태줄은 그 위에 띄운다. 선택 패널 등으로
+  // 도구 막대가 두 줄로 늘어나도 캔버스 크기가 안 바뀌어 그림이 밀리지 않는다.
+  // 트리 패널만 도구 막대 높이를 따라 내려가서 글씨와 겹치지 않게 한다.
+  const headerRef = useRef<HTMLDivElement | null>(null);
+  const [headerHeight, setHeaderHeight] = useState(0);
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setHeaderHeight(el.offsetHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // 좌측 트리 — 캔버스 위에 떠 있는 CATIA식 연결선 트리
   const treePanel = (
-      <div className="absolute top-2 left-3 z-10 w-64 max-w-[calc(100%-1.5rem)] max-h-[calc(100%-1rem)] flex flex-col rounded-lg border border-black/10 bg-white/90 backdrop-blur-sm shadow-lg">
+      <div
+        className="absolute left-3 z-10 w-64 max-w-[calc(100%-1.5rem)] flex flex-col rounded-lg border border-black/10 bg-white/90 backdrop-blur-sm shadow-lg"
+        style={{ top: headerHeight + 8, maxHeight: `calc(100% - ${headerHeight + 16}px)` }}
+      >
         <div className="flex-1 overflow-y-auto px-2 py-2 text-xs text-gray-700">
           <div className="flex items-center gap-1.5 h-6 px-1 font-bold text-gray-900">
             <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" strokeWidth="1.3">
@@ -3956,7 +4087,7 @@ export default function ProjectCanvas({
 
   return (
     <div className="fixed inset-0 bg-[#faf6ee] overflow-hidden">
-      <div className="absolute inset-0 flex flex-col">
+      <div ref={headerRef} className="absolute inset-x-0 top-0 z-20">
         <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 border-b border-black/10 bg-[#faf6ee]/90 backdrop-blur-sm">
           {mode === "overview" ? (
             <>
@@ -4340,7 +4471,7 @@ export default function ProjectCanvas({
           )}
         </div>
 
-        <div className="px-4 py-1 text-[11px] text-gray-400 flex gap-4">
+        <div className="px-4 py-1 text-[11px] text-gray-400 flex gap-4 bg-[#faf6ee]/85 backdrop-blur-sm">
           <span className="px-1.5 py-0.5 rounded bg-gray-900/5 text-gray-600 font-medium">
             단위: mm
           </span>
@@ -4402,24 +4533,22 @@ export default function ProjectCanvas({
           )}
           {pendingSaves > 0 && <span className="text-amber-700">저장 중…</span>}
         </div>
-
-        <div className="relative flex-1 min-h-0">
-          <div
-            ref={mountRef}
-            className="absolute inset-0"
-            style={{ touchAction: "none", cursor: isEraseTool(tool) && mode === "sketch" ? "crosshair" : undefined }}
-            onPointerDown={handlePointerDown}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerCancel}
-            onPointerMove={handleCanvasMove}
-            onPointerLeave={() => {
-              if (!eraseGestureRef.current) clearErasePreviewLine();
-            }}
-            onContextMenu={handleCanvasContextMenu}
-          />
-          {treePanel}
-        </div>
       </div>
+
+      <div
+        ref={mountRef}
+        className="absolute inset-0"
+        style={{ touchAction: "none", cursor: isEraseTool(tool) && mode === "sketch" ? ERASER_CURSOR : undefined }}
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
+        onPointerMove={handleCanvasMove}
+        onPointerLeave={() => {
+          if (!eraseGestureRef.current) clearErasePreviewLine();
+        }}
+        onContextMenu={handleCanvasContextMenu}
+      />
+      {treePanel}
     </div>
   );
 }
