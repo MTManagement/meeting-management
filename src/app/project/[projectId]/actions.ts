@@ -79,6 +79,43 @@ export async function ensureBasePlanes(projectId: string) {
   }
 }
 
+function normalize(v: Vec3): Vec3 {
+  const len = Math.hypot(v.x, v.y, v.z) || 1;
+  return { x: v.x / len, y: v.y / len, z: v.z / len };
+}
+
+// 원점(mm)·법선·가로축으로 평면을 만든다. 오프셋 평면, 점을 지나는 평행
+// 평면, 선에 수직인 평면 모두 방향 계산은 화면(미리보기)과 똑같이
+// 클라이언트에서 하고, 여기서는 저장만 한다. label이 없으면 "평면 N".
+export async function createPlaneFromDefinition(
+  projectId: string,
+  def: { label?: string; origin: Vec3; normal: Vec3; uAxis: Vec3 }
+) {
+  await assertOwner(projectId);
+  const normal = normalize(def.normal);
+  const uAxis = normalize(def.uAxis);
+  let label = def.label?.trim();
+  if (!label) {
+    const count = await prisma.plane.count({ where: { projectId } });
+    label = `평면 ${count + 1}`;
+  }
+  return prisma.plane.create({
+    data: {
+      projectId,
+      label,
+      originX: def.origin.x,
+      originY: def.origin.y,
+      originZ: def.origin.z,
+      normalX: normal.x,
+      normalY: normal.y,
+      normalZ: normal.z,
+      uAxisX: uAxis.x,
+      uAxisY: uAxis.y,
+      uAxisZ: uAxis.z,
+    },
+  });
+}
+
 // XY/YZ/XZ 기준 평면에서 법선 방향으로 offsetMm 만큼 이동한 평행 평면을 만든다.
 export async function createOffsetPlane(
   projectId: string,
@@ -111,11 +148,6 @@ function cross(a: Vec3, b: Vec3): Vec3 {
     y: a.z * b.x - a.x * b.z,
     z: a.x * b.y - a.y * b.x,
   };
-}
-
-function normalize(v: Vec3): Vec3 {
-  const len = Math.hypot(v.x, v.y, v.z) || 1;
-  return { x: v.x / len, y: v.y / len, z: v.z / len };
 }
 
 // 선택한 선(점 두 개)의 끝점을 지나면서 그 선의 방향에 수직인 평면을 만든다.
