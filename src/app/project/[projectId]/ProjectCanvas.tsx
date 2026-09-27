@@ -196,7 +196,7 @@ function createEditableLabelDiv(
     ev.stopPropagation();
     const input = document.createElement("input");
     input.type = "number";
-    input.value = div.textContent?.replace("mm", "") ?? "";
+    input.value = div.textContent?.replace(/[^0-9.-]/g, "") ?? "";
     input.style.width = "60px";
     input.style.fontSize = "11px";
     input.style.padding = "0 2px";
@@ -234,6 +234,265 @@ function countStrokes(edges: Iterable<EdgeRec>) {
   const keys = new Set<string>();
   for (const e of edges) keys.add(strokeKeyOf(e));
   return keys.size;
+}
+function groupByStroke(edges: Iterable<EdgeRec>) {
+  const groups = new Map<string, EdgeRec[]>();
+  for (const e of edges) {
+    const k = strokeKeyOf(e);
+    const list = groups.get(k);
+    if (list) list.push(e);
+    else groups.set(k, [e]);
+  }
+  return groups;
+}
+
+// ── 스케치 도구 ────────────────────────────────────────────────────
+// select: 선택·수정(기본) / free: 자유 그리기 / line: 직선 / rect: 사각형 / circle: 원
+type Tool = "select" | "free" | "line" | "rect" | "circle";
+const TOOL_DEFS: { id: Tool; key: string; title: string }[] = [
+  { id: "select", key: "v", title: "선택·수정 (V) — 점을 끌어 이동, 선을 탭해 선택" },
+  { id: "free", key: "p", title: "자유 그리기 (P) — 그은 궤적 그대로, 1초 멈추면 직선" },
+  { id: "line", key: "l", title: "직선 (L) — 누른 채 끌어서 직선, 이어그리기 가능" },
+  { id: "rect", key: "r", title: "사각형 (R) — 한 꼭짓점과 대각선 꼭짓점을 찍어서" },
+  { id: "circle", key: "c", title: "원 (C) — 중심을 찍고 크기를 정해서" },
+];
+
+// 사각형·원은 DB 구조를 바꾸지 않고 획 id(strokeId) 앞에 도형 종류를
+// 붙여 저장한다. 나중에 진짜 원/사각형 타입으로 옮길 때 이 표시로 변환한다.
+const RECT_PREFIX = "rect:";
+const CIRCLE_PREFIX = "circle:";
+const CIRCLE_SEGMENTS = 72;
+const RECT_TOL = 0.002; // scene 단위 ≈ 2mm, 좌표가 mm로 반올림돼 저장되므로 여유를 둔다
+
+// ── 자석(오브젝트) 스냅 ─────────────────────────────────────────────
+// 붙는 거리는 mm가 아니라 화면 픽셀 기준 — 확대/축소와 무관하게 손맛이 같다.
+const SNAP_PX_MOUSE = 14;
+const SNAP_PX_TOUCH = 28;
+const ON_PLANE_TOL = 0.001; // scene 단위 ≈ 1mm, 다른 스케치가 이 평면 위에 있는지 판정
+
+type SnapKind = "origin" | "end" | "mid" | "center" | "cross" | "on";
+const SNAP_LABEL: Record<SnapKind, string> = {
+  origin: "원점",
+  end: "끝점",
+  mid: "중점",
+  center: "중심",
+  cross: "교차점",
+  on: "선 위",
+};
+type SnapHit = { pos: THREE.Vector3; kind: SnapKind; pointId?: string };
+type SnapRefs = {
+  points: { pos: THREE.Vector3; kind: SnapKind }[];
+  segs: [THREE.Vector3, THREE.Vector3][];
+};
+
+// 스케치의 (0,0) = 월드 원점(0,0,0)을 스케치 평면에 수직으로 내린 점(mm).
+// XY·YZ·XZ 기본 평면은 원점을 지나므로 (0,0,0) 그대로다.
+function sketchOriginMm(plane: PlaneData): Vec3 {
+  const n = vecUnit(plane.normal);
+  const d = n.x * plane.origin.x + n.y * plane.origin.y + n.z * plane.origin.z;
+  return { x: n.x * d, y: n.y * d, z: n.z * d };
+}
+
+function closestPointOnSegment(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3) {
+  const ab = b.clone().sub(a);
+  const len2 = ab.lengthSq();
+  if (len2 < 1e-12) return a.clone();
+  const t = Math.min(1, Math.max(0, p.clone().sub(a).dot(ab) / len2));
+  return a.clone().add(ab.multiplyScalar(t));
+}
+
+// "곧은 선"(치수가 붙는 선)인지: 선분 하나짜리 획이거나 양끝이 보이는 꼭짓점.
+// 자유곡선의 잘게 쪼갠 조각은 아니다 — 중점 스냅은 곧은 선에만 준다.
+function isStraightEdge(
+  e: EdgeRec,
+  pointById: Map<string, PointRec>,
+  strokeSizes: Map<string, number>
+) {
+  if ((strokeSizes.get(strokeKeyOf(e)) ?? 1) === 1) return true;
+  const a = pointById.get(e.fromId);
+  const b = pointById.get(e.toId);
+  return a?.isVertex !== false && b?.isVertex !== false;
+}
+
+function circleInfo(edges: EdgeRec[], pointById: Map<string, PointRec>) {
+  if (edges.length < 8 || !edges[0].strokeId?.startsWith(CIRCLE_PREFIX)) return null;
+  const ids = new Set<string>();
+  for (const e of edges) {
+    ids.add(e.fromId);
+    ids.add(e.toId);
+  }
+  const pts = [...ids].map((id) => pointById.get(id)).filter((p): p is PointRec => !!p);
+  if (pts.length < 8) return null;
+  const center = {
+    x: pts.reduce((s, p) => s + p.x, 0) / pts.length,
+    y: pts.reduce((s, p) => s + p.y, 0) / pts.length,
+    z: pts.reduce((s, p) => s + p.z, 0) / pts.length,
+  };
+  const radiusMm =
+    pts.reduce((s, p) => s + Math.hypot(p.x - center.x, p.y - center.y, p.z - center.z), 0) /
+    pts.length;
+  return { center, radiusMm, pointIds: [...ids] };
+}
+
+// 사각형 획(rect:)이 여전히 온전한 직사각형이면 네 꼭짓점의 평면 기준 좌표를
+// 돌려준다. 점을 지우는 등으로 모양이 깨졌으면 null(보통 선처럼 취급).
+type RectInfo = {
+  corners: { id: string; u: number; v: number }[];
+  uMin: number;
+  uMax: number;
+  vMin: number;
+  vMax: number;
+};
+function rectInfo(
+  plane: PlaneData,
+  edges: EdgeRec[],
+  pointById: Map<string, PointRec>
+): RectInfo | null {
+  if (edges.length !== 4 || !edges[0].strokeId?.startsWith(RECT_PREFIX)) return null;
+  const ids = new Set<string>();
+  for (const e of edges) {
+    ids.add(e.fromId);
+    ids.add(e.toId);
+  }
+  if (ids.size !== 4) return null;
+  const corners: RectInfo["corners"] = [];
+  for (const id of ids) {
+    const p = pointById.get(id);
+    if (!p) return null;
+    const { u, v } = toLocalUV(plane, vecMm(p));
+    corners.push({ id, u, v });
+  }
+  const us = corners.map((c) => c.u);
+  const vs = corners.map((c) => c.v);
+  const info = {
+    corners,
+    uMin: Math.min(...us),
+    uMax: Math.max(...us),
+    vMin: Math.min(...vs),
+    vMax: Math.max(...vs),
+  };
+  const tol = RECT_TOL;
+  if (info.uMax - info.uMin < tol || info.vMax - info.vMin < tol) return null;
+  const onCorner = corners.every(
+    (c) =>
+      (Math.abs(c.u - info.uMin) < tol || Math.abs(c.u - info.uMax) < tol) &&
+      (Math.abs(c.v - info.vMin) < tol || Math.abs(c.v - info.vMax) < tol)
+  );
+  return onCorner ? info : null;
+}
+// 사각형에서 치수를 보여줄 두 변: 아래 가로변과 오른쪽 세로변.
+function rectLabelEdgeIds(plane: PlaneData, edges: EdgeRec[], pointById: Map<string, PointRec>) {
+  const info = rectInfo(plane, edges, pointById);
+  if (!info) return null;
+  const uv = new Map(info.corners.map((c) => [c.id, c]));
+  const tol = RECT_TOL;
+  const result = new Set<string>();
+  for (const e of edges) {
+    const a = uv.get(e.fromId)!;
+    const b = uv.get(e.toId)!;
+    const horizontal = Math.abs(a.v - b.v) < tol;
+    if (horizontal && Math.abs(a.v - info.vMin) < tol) result.add(e.id);
+    if (!horizontal && Math.abs(a.u - info.uMax) < tol) result.add(e.id);
+  }
+  return result;
+}
+
+// 다른 스케치들 중에서 지금 스케치 평면에 붙을 수 있는 점·선을 모은다.
+// - 이 평면 위에 놓인 점(끝점)·선(선 위, 중점)
+// - 이 평면을 뚫고 지나가는 선의 교차점 (CATIA에서 다른 요소를 참조하는 느낌)
+function buildOtherSnapRefs(plane: PlaneData, sketches: SketchData[]): SnapRefs {
+  const tp = toThreePlane(plane);
+  const refs: SnapRefs = { points: [], segs: [] };
+  for (const sk of sketches) {
+    const pointById = new Map(sk.points.map((p) => [p.id, p]));
+    const degree = new Map<string, number>();
+    const strokeSizes = new Map<string, number>();
+    for (const e of sk.edges) {
+      degree.set(e.fromId, (degree.get(e.fromId) ?? 0) + 1);
+      degree.set(e.toId, (degree.get(e.toId) ?? 0) + 1);
+      const k = strokeKeyOf(e);
+      strokeSizes.set(k, (strokeSizes.get(k) ?? 0) + 1);
+    }
+    for (const p of sk.points) {
+      if (p.isVertex === false && degree.get(p.id) !== 1) continue;
+      const pos = vecMm(p);
+      if (Math.abs(tp.distanceToPoint(pos)) < ON_PLANE_TOL) refs.points.push({ pos, kind: "end" });
+    }
+    for (const [, group] of groupByStroke(sk.edges)) {
+      const ci = circleInfo(group, pointById);
+      if (!ci) continue;
+      const c = vecMm(ci.center);
+      if (Math.abs(tp.distanceToPoint(c)) < ON_PLANE_TOL) refs.points.push({ pos: c, kind: "center" });
+    }
+    for (const e of sk.edges) {
+      const a = pointById.get(e.fromId);
+      const b = pointById.get(e.toId);
+      if (!a || !b) continue;
+      const av = vecMm(a);
+      const bv = vecMm(b);
+      const da = tp.distanceToPoint(av);
+      const db = tp.distanceToPoint(bv);
+      if (Math.abs(da) < ON_PLANE_TOL && Math.abs(db) < ON_PLANE_TOL) {
+        refs.segs.push([av, bv]);
+        if (isStraightEdge(e, pointById, strokeSizes)) {
+          refs.points.push({ pos: av.clone().add(bv).multiplyScalar(0.5), kind: "mid" });
+        }
+      } else if (da * db < 0) {
+        refs.points.push({ pos: av.clone().lerp(bv, da / (da - db)), kind: "cross" });
+      }
+    }
+  }
+  return refs;
+}
+
+function ToolIcon({ kind }: { kind: Tool }) {
+  const common = {
+    viewBox: "0 0 20 20",
+    className: "w-5 h-5",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.5,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
+  switch (kind) {
+    case "select":
+      return (
+        <svg {...common}>
+          <path d="M5 3 L5 15.5 L8.3 12.4 L10.6 17.2 L12.7 16.2 L10.4 11.5 L15 11.2 Z" />
+        </svg>
+      );
+    case "free":
+      // 45°로 기울어진 연필
+      return (
+        <svg {...common}>
+          <path d="M3.5 16.5 L4.3 13.2 L13.2 4.3 a1.6 1.6 0 0 1 2.3 0 l0.2 0.2 a1.6 1.6 0 0 1 0 2.3 L6.8 15.7 Z" />
+          <path d="M11.8 5.7 L14.3 8.2" />
+          <path d="M4.3 13.2 L6.8 15.7" />
+        </svg>
+      );
+    case "line":
+      return (
+        <svg {...common}>
+          <path d="M5 15 L15 5" />
+          <circle cx="5" cy="15" r="1.6" fill="currentColor" stroke="none" />
+          <circle cx="15" cy="5" r="1.6" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case "rect":
+      return (
+        <svg {...common}>
+          <rect x="3.5" y="5" width="13" height="10" rx="0.5" />
+        </svg>
+      );
+    case "circle":
+      return (
+        <svg {...common}>
+          <circle cx="10" cy="10" r="6.5" />
+          <circle cx="10" cy="10" r="0.9" fill="currentColor" stroke="none" />
+        </svg>
+      );
+  }
 }
 
 // 점을 화면 크기와 무관하게 항상 같은 픽셀 크기의 동그라미로 그리기
@@ -372,7 +631,7 @@ export default function ProjectCanvas({
   const [mode, setMode] = useState<"overview" | "sketch">("overview");
   const [activePlaneId, setActivePlaneId] = useState<string | null>(null);
   const [activeSketchId, setActiveSketchId] = useState<string | null>(null);
-  const [tool, setTool] = useState<"pen" | "move">("pen");
+  const [tool, setTool] = useState<Tool>("select");
 
   const [selectedPlaneId, setSelectedPlaneId] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<{
@@ -401,12 +660,29 @@ export default function ProjectCanvas({
   const [snapEnabled, setSnapEnabled] = useState(false);
   const [snapSizeInput, setSnapSizeInput] = useState("50");
 
-  // 그리기 방식: 둘 다 꺼져 있으면(기본) 누른 채로 그은 궤적 그대로
-  // 그려지다가 1초 이상 멈추면 그 순간부터 직선으로 바뀐다.
-  // "이어그리기"를 켜면 탭으로 점을 찍어서 잇는 기존 방식.
-  // "직선으로 그리기"를 켜면 궤적과 무관하게 항상 시작~끝 직선.
+  // 직선 도구에서 "이어그리기"를 켜면 탭으로 점을 찍어서 잇는다(오토캐드식).
+  // 끄면 누른 채 끌어서 시작~끝 직선을 하나씩 긋는다.
   const [chainMode, setChainMode] = useState(false);
-  const [straightMode, setStraightMode] = useState(false);
+
+  // 사각형·원 도구: 첫 점(꼭짓점/중심)을 찍은 뒤 두 번째 점을 기다리는 상태.
+  // 탭-탭(첫 점 탭, 대각선 점 탭)과 누른 채 끌기 둘 다 된다.
+  const shapeStartRef = useRef<THREE.Vector3 | null>(null);
+  const shapeStartedThisDownRef = useRef(false);
+  const lastShapeEndRef = useRef<THREE.Vector3 | null>(null);
+  const [shapePending, setShapePending] = useState(false);
+  // 치수 직접 입력: 사각형은 a=가로, b=세로 / 원은 a=지름. field는 키보드 입력이 들어갈 칸.
+  const shapeDimsRef = useRef<{ a: string; b: string; field: 0 | 1 }>({ a: "", b: "", field: 0 });
+  const [shapeDims, setShapeDimsState] = useState<{ a: string; b: string; field: 0 | 1 }>({
+    a: "",
+    b: "",
+    field: 0,
+  });
+  const shapePreviewRef = useRef<THREE.LineLoop | null>(null);
+  const shapePreviewLabelsRef = useRef<CSS2DObject[]>([]);
+  const activeShapeLabelsRef = useRef<Map<string, CSS2DObject>>(new Map()); // 원 지름 라벨
+  const snapMarkerRef = useRef<THREE.Points | null>(null);
+  const snapLabelRef = useRef<CSS2DObject | null>(null);
+  const lastPointerTypeRef = useRef<string>("mouse");
 
   // 그리는 중 키보드로 입력한 치수(숫자). 상태바 표시용이고 실제 값은 ref에 있다.
   const [typedLength, setTypedLength] = useState("");
@@ -486,6 +762,15 @@ export default function ProjectCanvas({
   }, [pendingSaves]);
 
   const activePlane = planes.find((p) => p.id === activePlaneId) ?? null;
+
+  // 스케치 안에서 자석처럼 붙을 다른 스케치들의 점·선 (이 평면 기준)
+  const otherSnapRefs = useMemo<SnapRefs | null>(() => {
+    if (mode !== "sketch" || !activePlane) return null;
+    const others = [...planes.flatMap((p) => p.sketches), ...(freeSketch ? [freeSketch] : [])].filter(
+      (s) => s.id !== activeSketchId
+    );
+    return buildOtherSnapRefs(activePlane, others);
+  }, [mode, activePlane, planes, freeSketch, activeSketchId]);
 
   // 아이패드 사파리에서 100vh는 주소창이 보였다 사라졌다 할 때 불안정해서
   // 페이지 자체가 스크롤되며 상단 툴바가 화면 밖으로 밀려 올라가 버린다.
@@ -813,6 +1098,14 @@ export default function ProjectCanvas({
     const from = activePointsRef.current.get(e.fromId);
     const to = activePointsRef.current.get(e.toId);
     if (!from || !to) return;
+    pushUndoSnapshot();
+    // 사각형의 변이면 사각형 모양을 유지한 채 가로/세로만 바꾼다.
+    const rect = rectOfStroke(strokeKeyOf(e));
+    if (rect) {
+      applyRectSize(rect, e, newLenMm);
+      dirtyRef.current = true;
+      return;
+    }
     const dx = to.x - from.x;
     const dy = to.y - from.y;
     const dz = to.z - from.z;
@@ -865,9 +1158,109 @@ export default function ProjectCanvas({
   function clearActiveGeometry() {
     for (const id of [...activePointMeshesRef.current.keys()]) removeActivePointMesh(id);
     for (const id of [...activeEdgeLinesRef.current.keys()]) removeActiveEdgeLine(id);
+    clearShapeLabels();
     activePointsRef.current.clear();
     activeEdgesRef.current.clear();
     lastPointIdRef.current = null;
+  }
+
+  // 점 위치를 그대로(스냅 없이) 옮기고 연결된 선·라벨을 갱신한다.
+  function setPointPos(pointId: string, pos: THREE.Vector3) {
+    const rec = activePointsRef.current.get(pointId);
+    if (!rec) return;
+    rec.x = sceneToMm(pos.x);
+    rec.y = sceneToMm(pos.y);
+    rec.z = sceneToMm(pos.z);
+    activePointMeshesRef.current.get(pointId)?.position.copy(vecMm(rec));
+    refreshEdgesForPoint(pointId);
+  }
+
+  // ── 사각형·원: 모양을 유지한 편집 ───────────────────────────────
+  function rectOfStroke(key: string, plane: PlaneData | null = activePlane) {
+    if (!plane || !key.startsWith(RECT_PREFIX)) return null;
+    const edges = [...activeEdgesRef.current.values()].filter((e) => strokeKeyOf(e) === key);
+    return rectInfo(plane, edges, activePointsRef.current);
+  }
+  function rectOfPoint(pointId: string) {
+    for (const e of activeEdgesRef.current.values()) {
+      if (e.fromId !== pointId && e.toId !== pointId) continue;
+      const rect = rectOfStroke(strokeKeyOf(e));
+      if (rect) return rect;
+    }
+    return null;
+  }
+  function setRectCorners(rect: RectInfo, uFor: (u: number) => number, vFor: (v: number) => number) {
+    if (!activePlane) return;
+    for (const c of rect.corners) setPointPos(c.id, fromLocalUV(activePlane, uFor(c.u), vFor(c.v)));
+  }
+  // 꼭짓점 하나를 끌면 대각선 반대 꼭짓점은 고정, 직사각형을 유지한다.
+  function moveRectCorner(rect: RectInfo, pointId: string, target: THREE.Vector3) {
+    if (!activePlane) return;
+    const c = rect.corners.find((k) => k.id === pointId);
+    if (!c) return;
+    const opp = {
+      u: Math.abs(c.u - rect.uMin) < RECT_TOL ? rect.uMax : rect.uMin,
+      v: Math.abs(c.v - rect.vMin) < RECT_TOL ? rect.vMax : rect.vMin,
+    };
+    const t = toLocalUV(activePlane, target);
+    setRectCorners(
+      rect,
+      (u) => (Math.abs(u - c.u) < RECT_TOL ? t.u : opp.u),
+      (v) => (Math.abs(v - c.v) < RECT_TOL ? t.v : opp.v)
+    );
+  }
+  // 치수 라벨 입력: 가로변이면 왼쪽을 고정하고 가로를, 세로변이면 아래를 고정하고 세로를 바꾼다.
+  function applyRectSize(rect: RectInfo, edge: EdgeRec, newLenMm: number) {
+    const a = rect.corners.find((k) => k.id === edge.fromId);
+    const b = rect.corners.find((k) => k.id === edge.toId);
+    if (!a || !b) return;
+    const len = mmToScene(newLenMm);
+    if (Math.abs(a.v - b.v) < RECT_TOL) {
+      setRectCorners(rect, (u) => (Math.abs(u - rect.uMax) < RECT_TOL ? rect.uMin + len : u), (v) => v);
+    } else {
+      setRectCorners(rect, (u) => u, (v) => (Math.abs(v - rect.vMax) < RECT_TOL ? rect.vMin + len : v));
+    }
+  }
+  // 원 지름 라벨 입력: 중심은 고정하고 크기만 바꾼다.
+  function applyCircleDiameter(key: string, diameterMm: number) {
+    const edges = [...activeEdgesRef.current.values()].filter((e) => strokeKeyOf(e) === key);
+    const info = circleInfo(edges, activePointsRef.current);
+    if (!info || info.radiusMm <= 0) return;
+    pushUndoSnapshot();
+    const scale = diameterMm / 2 / info.radiusMm;
+    const c = info.center;
+    for (const id of info.pointIds) {
+      const p = activePointsRef.current.get(id);
+      if (!p) continue;
+      setPointPos(
+        id,
+        vecMm({ x: c.x + (p.x - c.x) * scale, y: c.y + (p.y - c.y) * scale, z: c.z + (p.z - c.z) * scale })
+      );
+    }
+    rebuildShapeLabels();
+    dirtyRef.current = true;
+  }
+  function clearShapeLabels() {
+    for (const l of activeShapeLabelsRef.current.values()) activeLabelGroupRef.current?.remove(l);
+    activeShapeLabelsRef.current.clear();
+  }
+  // 원마다 지름 라벨(Ø)을 하나씩 붙인다. 원을 이루는 72개 조각에는 치수를 안 붙인다.
+  function rebuildShapeLabels(plane: PlaneData | null = activePlane) {
+    clearShapeLabels();
+    if (!plane) return;
+    const { uAxis } = planeBasis(plane);
+    for (const [key, edges] of groupByStroke(activeEdgesRef.current.values())) {
+      if (!key.startsWith(CIRCLE_PREFIX)) continue;
+      const info = circleInfo(edges, activePointsRef.current);
+      if (!info) continue;
+      const div = createEditableLabelDiv(`Ø${Math.round(info.radiusMm * 2)}mm`, (mm) =>
+        applyCircleDiameter(key, mm)
+      );
+      const label = new CSS2DObject(div);
+      label.position.copy(vecMm(info.center).add(uAxis.clone().multiplyScalar(mmToScene(info.radiusMm))));
+      activeLabelGroupRef.current?.add(label);
+      activeShapeLabelsRef.current.set(key, label);
+    }
   }
 
   // 상태바 표시용 개수. 선은 획(한 번에 그은 선) 단위, 점은 화면에
@@ -901,6 +1294,7 @@ export default function ProjectCanvas({
       activeEdgesRef.current.set(e.id, e);
       addActiveEdgeLine(e, e.showLabel ?? true);
     }
+    rebuildShapeLabels();
     syncCounts();
     dirtyRef.current = true;
     selectActivePoint(null);
@@ -937,10 +1331,25 @@ export default function ProjectCanvas({
       opacity: 0.6,
     });
     const points = new THREE.Points(geo, mat);
-    const { origin } = planeBasis(activePlane);
+    const { origin, uAxis, vAxis } = planeBasis(activePlane);
     points.position.copy(origin);
     points.quaternion.copy(planeQuaternion(activePlane));
     gridGroup.add(points);
+
+    // 스케치 원점 (0,0): 월드 원점을 이 평면에 내린 점. 가로·세로 기준선을 옅게 표시.
+    const o = vecMm(sketchOriginMm(activePlane));
+    const half = mmToScene(400);
+    for (const axis of [uAxis, vAxis]) {
+      const lineGeo = new THREE.BufferGeometry().setFromPoints([
+        o.clone().add(axis.clone().multiplyScalar(-half)),
+        o.clone().add(axis.clone().multiplyScalar(half)),
+      ]);
+      const lineMat = new THREE.LineDashedMaterial({ color: REF_EDGE, dashSize: 0.02, gapSize: 0.015 });
+      const line = new THREE.Line(lineGeo, lineMat);
+      line.computeLineDistances();
+      gridGroup.add(line);
+    }
+    gridGroup.add(makeDot(o, REF_EDGE, 8));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, activePlaneId]);
 
@@ -963,11 +1372,11 @@ export default function ProjectCanvas({
   }
 
   // ── 스케치 진입/이탈 ────────────────────────────────────────────
-  // 기존 스케치를 열 때는 "수정" 상태로 시작하고(실수로 선이 이어지지
-  // 않게), 방금 만든 빈 스케치는 바로 그릴 수 있게 "그리기" 상태로 연다.
-  function enterSketch(plane: PlaneData, sketch: SketchData, startTool: "pen" | "move" = "move") {
+  // 스케치에 들어가면 항상 "선택" 도구(마우스 커서)로 시작한다.
+  function enterSketch(plane: PlaneData, sketch: SketchData) {
     stopConnect();
     setPlaneTool(null);
+    cancelShape();
     clearActiveGeometry();
     undoStackRef.current = [];
     for (const p of sketch.points) activePointsRef.current.set(p.id, p);
@@ -983,23 +1392,36 @@ export default function ProjectCanvas({
       const k = strokeKeyOf(e);
       strokeSizes.set(k, (strokeSizes.get(k) ?? 0) + 1);
     }
+    // 사각형은 네 변 중 아래 가로변·오른쪽 세로변에만 치수를 단다.
+    const rectLabelIds = new Set<string>();
+    for (const [key, edges] of groupByStroke(activeEdgesRef.current.values())) {
+      if (!key.startsWith(RECT_PREFIX)) continue;
+      for (const id of rectLabelEdgeIds(plane, edges, activePointsRef.current) ?? []) {
+        rectLabelIds.add(id);
+      }
+    }
     for (const [, e] of activeEdgesRef.current) {
       if (e.showLabel === undefined) {
+        const key = strokeKeyOf(e);
         const from = activePointsRef.current.get(e.fromId);
         const to = activePointsRef.current.get(e.toId);
-        const single = (strokeSizes.get(strokeKeyOf(e)) ?? 1) === 1;
+        const single = (strokeSizes.get(key) ?? 1) === 1;
         const visibleEnds = from?.isVertex !== false && to?.isVertex !== false;
-        e.showLabel = single || visibleEnds;
+        if (key.startsWith(CIRCLE_PREFIX)) e.showLabel = false;
+        else if (key.startsWith(RECT_PREFIX) && (strokeSizes.get(key) ?? 0) === 4) {
+          e.showLabel = rectLabelIds.has(e.id);
+        } else e.showLabel = single || visibleEnds;
       }
       addActiveEdgeLine(e, e.showLabel);
     }
+    rebuildShapeLabels(plane);
     syncCounts();
     dirtyRef.current = false;
 
     setActivePlaneId(plane.id);
     setActiveSketchId(sketch.id);
     setMode("sketch");
-    setTool(startTool);
+    setTool("select");
     setSelectedPlaneId(null);
     setSelectedEdge(null);
     setPendingPerpEdge(null);
@@ -1020,6 +1442,7 @@ export default function ProjectCanvas({
     }
     clearActiveGeometry();
     undoStackRef.current = [];
+    cancelShape();
     hideDrawPreview();
     draggingPointIdRef.current = null;
     setSelectedPointId(null);
@@ -1042,7 +1465,7 @@ export default function ProjectCanvas({
     setBusy(true);
     try {
       const sketch = await createSketch(projectId, plane.id);
-      enterSketch(plane, { id: sketch.id, name: sketch.name, points: [], edges: [] }, "pen");
+      enterSketch(plane, { id: sketch.id, name: sketch.name, points: [], edges: [] });
       router.refresh();
     } finally {
       setBusy(false);
@@ -1626,16 +2049,26 @@ export default function ProjectCanvas({
     return hit ? target : null;
   }
 
-  // 탭/직선 끝점은 손가락으로 "도형 닫기"를 정확히 못 짚어도 붙게
-  // 반경을 넉넉히(180mm) 잡는다. 자유곡선 내부 점은 훨씬 촘촘하게
-  // 샘플링되므로 같은 반경을 쓰면 곡선이 자기 자신과 계속 병합돼서
-  // 각지게 보인다 — 그래서 자유곡선 구간에는 훨씬 좁은 반경(3mm)을 쓴다.
-  const NEARBY_POINT_THRESHOLD = 0.18; // scene 단위 ≈ 180mm
+  // 자유곡선 내부 점은 아주 촘촘하게 샘플링되므로 넓은 반경으로 병합하면
+  // 곡선이 자기 자신과 계속 붙어서 각지게 보인다 — 그래서 3mm만 쓴다.
+  // 그 밖의 "붙기"는 모두 화면 픽셀 기준 자석 스냅(findObjectSnap)이 맡는다.
   const FREEHAND_NEARBY_THRESHOLD = 0.003; // scene 단위 ≈ 3mm
+  const EXACT_POINT_THRESHOLD = 0.0005; // scene 단위 ≈ 0.5mm, 같은 자리의 점 재사용
+
+  // 화면 픽셀 거리를 이 위치에서의 scene 거리로 바꾼다(확대할수록 작아짐).
+  function snapThresholdScene(at: THREE.Vector3) {
+    const camera = cameraRef.current;
+    const mount = mountRef.current;
+    if (!camera || !mount) return 0.05;
+    const d = camera.position.distanceTo(at);
+    const perPx = (2 * d * Math.tan((camera.fov * Math.PI) / 360)) / Math.max(1, mount.clientHeight);
+    const px = lastPointerTypeRef.current === "touch" ? SNAP_PX_TOUCH : SNAP_PX_MOUSE;
+    return px * perPx;
+  }
 
   function findNearbyActivePoint(
     pos: THREE.Vector3,
-    threshold = NEARBY_POINT_THRESHOLD,
+    threshold = snapThresholdScene(pos),
     vertexOnly = false
   ): string | null {
     let best: string | null = null;
@@ -1651,21 +2084,131 @@ export default function ProjectCanvas({
     return best;
   }
 
-  // 점 하나를 찍고(가까운 점 있으면 그 점 사용), 이전 점이 있으면 선까지 잇는다.
+  // ── 자석 스냅: 원점·끝점·중점·원 중심·교차점 → 없으면 선 위 ──────────
+  // exclude: 지금 끌고 있는 점(들). 자기 자신이나 자기 선에 붙지 않게 뺀다.
+  function findObjectSnap(raw: THREE.Vector3, exclude?: Set<string>): SnapHit | null {
+    if (!activePlane) return null;
+    const th = snapThresholdScene(raw);
+    const acc: { best: SnapHit | null; d: number } = { best: null, d: th };
+    const consider = (pos: THREE.Vector3, kind: SnapKind, pointId?: string) => {
+      const d = raw.distanceTo(pos);
+      if (d < acc.d) {
+        acc.d = d;
+        acc.best = { pos: pos.clone(), kind, pointId };
+      }
+    };
+
+    const points = activePointsRef.current;
+    const edges = [...activeEdgesRef.current.values()];
+    const degree = new Map<string, number>();
+    const strokeSizes = new Map<string, number>();
+    for (const e of edges) {
+      degree.set(e.fromId, (degree.get(e.fromId) ?? 0) + 1);
+      degree.set(e.toId, (degree.get(e.toId) ?? 0) + 1);
+      const k = strokeKeyOf(e);
+      strokeSizes.set(k, (strokeSizes.get(k) ?? 0) + 1);
+    }
+    const skipEdge = (e: EdgeRec) => !!exclude && (exclude.has(e.fromId) || exclude.has(e.toId));
+
+    consider(vecMm(sketchOriginMm(activePlane)), "origin");
+    for (const [id, p] of points) {
+      if (exclude?.has(id)) continue;
+      if (p.isVertex === false && degree.get(id) !== 1) continue;
+      consider(vecMm(p), "end", id);
+    }
+    for (const [key, group] of groupByStroke(edges)) {
+      if (!key.startsWith(CIRCLE_PREFIX) || group.some(skipEdge)) continue;
+      const ci = circleInfo(group, points);
+      if (ci) consider(vecMm(ci.center), "center");
+    }
+    for (const e of edges) {
+      if (skipEdge(e) || !isStraightEdge(e, points, strokeSizes)) continue;
+      const a = points.get(e.fromId);
+      const b = points.get(e.toId);
+      if (a && b) consider(vecMm(a).add(vecMm(b)).multiplyScalar(0.5), "mid");
+    }
+    for (const r of otherSnapRefs?.points ?? []) consider(r.pos, r.kind);
+    if (acc.best) return acc.best;
+
+    for (const e of edges) {
+      if (skipEdge(e)) continue;
+      const a = points.get(e.fromId);
+      const b = points.get(e.toId);
+      if (a && b) consider(closestPointOnSegment(raw, vecMm(a), vecMm(b)), "on");
+    }
+    for (const [a, b] of otherSnapRefs?.segs ?? []) consider(closestPointOnSegment(raw, a, b), "on");
+    return acc.best;
+  }
+
+  // 자석 스냅이 있으면 그 자리, 없으면 격자 스냅(+필요하면 수평·수직 스냅).
+  function resolveTarget(
+    raw: THREE.Vector3,
+    opts: { ortho?: boolean; orthoRef?: THREE.Vector3; exclude?: Set<string> } = {}
+  ): { pos: THREE.Vector3; hit: SnapHit | null } {
+    const hit = findObjectSnap(raw, opts.exclude);
+    if (hit) return { pos: hit.pos, hit };
+    const grid = applySnap(raw);
+    return { pos: opts.ortho ? applyOrthoSnap(grid, opts.orthoRef) : grid, hit: null };
+  }
+
+  // 붙는 자리에 주황 점 + "끝점/중점…" 이름표를 잠깐 보여준다.
+  function showSnapMarker(hit: SnapHit | null) {
+    if (!hit) {
+      hideSnapMarker();
+      return;
+    }
+    if (!snapMarkerRef.current) {
+      const dot = makeDot(hit.pos, SELECT_COLOR, 12);
+      previewGroupRef.current?.add(dot);
+      snapMarkerRef.current = dot;
+    } else {
+      snapMarkerRef.current.position.copy(hit.pos);
+    }
+    if (!snapLabelRef.current) {
+      const outer = document.createElement("div");
+      const inner = createLabelDiv("");
+      inner.style.transform = "translate(34px, -14px)";
+      inner.style.color = "#c2410c";
+      inner.style.borderColor = "rgba(194, 65, 12, 0.4)";
+      outer.appendChild(inner);
+      const label = new CSS2DObject(outer);
+      previewGroupRef.current?.add(label);
+      snapLabelRef.current = label;
+    }
+    snapLabelRef.current.position.copy(hit.pos);
+    const inner = snapLabelRef.current.element.firstChild as HTMLElement | null;
+    if (inner) inner.textContent = SNAP_LABEL[hit.kind];
+  }
+  function hideSnapMarker() {
+    if (snapMarkerRef.current) {
+      previewGroupRef.current?.remove(snapMarkerRef.current);
+      snapMarkerRef.current.geometry.dispose();
+      (snapMarkerRef.current.material as THREE.Material).dispose();
+      snapMarkerRef.current = null;
+    }
+    if (snapLabelRef.current) {
+      previewGroupRef.current?.remove(snapLabelRef.current);
+      snapLabelRef.current = null;
+    }
+  }
+
+  // 점 하나를 찍고(같은 자리 점이 있으면 그 점 사용), 이전 점이 있으면 선까지 잇는다.
   // 마우스 클릭과 키보드 치수 입력(Enter) 양쪽에서 공용으로 쓴다.
-  // showLabel=false면 치수 라벨을 안 붙인다 (자유곡선을 잘게 쪼갠 구간용 —
-  // 30mm 단위 조각마다 치수가 다 뜨면 지저분하므로, 진짜 직선을 그을 때만 보여준다).
-  // showPoint=false면 점(구슬) 표시를 안 한다 (자유곡선 중간 보간점용 —
-  // 궤적을 부드럽게 유지하기 위한 점일 뿐, 실제 꼭짓점처럼 보이면 안 되므로).
+  // showLabel=false면 치수 라벨을 안 붙인다 (자유곡선을 잘게 쪼갠 구간용).
+  // showPoint=false면 점(구슬) 표시를 안 한다 (자유곡선 중간 보간점, 드래그로 그은 선의 끝점).
   function commitDrawPoint(
     target: THREE.Vector3,
     showLabel = true,
     showPoint = true,
-    nearbyThreshold = NEARBY_POINT_THRESHOLD
+    reuseId: string | null = null,
+    nearbyThreshold = EXACT_POINT_THRESHOLD
   ) {
     // 이어지는 선이 없는 상태(새 선의 시작)면 새 획 id를 만든다.
     if (!lastPointIdRef.current) currentStrokeIdRef.current = crypto.randomUUID();
-    let pointId = findNearbyActivePoint(target, nearbyThreshold);
+    let pointId =
+      reuseId && activePointsRef.current.has(reuseId)
+        ? reuseId
+        : findNearbyActivePoint(target, nearbyThreshold);
     if (!pointId) {
       pointId = `tmp_${crypto.randomUUID()}`;
       const rec: PointRec = {
@@ -1700,33 +2243,23 @@ export default function ProjectCanvas({
     clearTypedLength();
   }
 
-  // 격자·직교 스냅보다 "근처 기존 점에 물리는 것"을 항상 우선한다.
-  // 그렇지 않으면 도형을 닫으려고 첫 점 근처를 찍었을 때 마그네틱
-  // 스냅이 커서를 다른 방향으로 틀어버려서 정확히 안 물릴 수 있다.
+  // 자석 스냅(기존 점·원점·선 등)을 격자·직교 스냅보다 항상 우선한다.
+  // 그래야 도형을 닫으려고 첫 점 근처를 찍었을 때 정확히 물린다.
+  // ortho=true면 직전 점 기준 수평·수직 스냅도 건다.
   function commitDrawPointFromRaw(
     raw: THREE.Vector3,
-    snap = true,
+    ortho = true,
     showLabel = true,
-    showPoint = true,
-    nearbyThreshold = NEARBY_POINT_THRESHOLD
+    showPoint = true
   ) {
-    const nearbyId = findNearbyActivePoint(raw, nearbyThreshold);
-    const target = nearbyId
-      ? vecMm(activePointsRef.current.get(nearbyId)!)
-      : snap
-        ? applyOrthoSnap(applySnap(raw))
-        : raw;
-    commitDrawPoint(target, showLabel, showPoint, nearbyThreshold);
+    const { pos, hit } = resolveTarget(raw, { ortho: ortho && !!lastPointIdRef.current });
+    commitDrawPoint(pos, showLabel, showPoint, hit?.pointId ?? null);
   }
 
   // 자유곡선 그대로 그린 궤적을 여러 짧은 직선(점 여러 개)으로 커밋한다.
   // 1mm 이상 떨어진 점만 남겨서 곡선의 세밀한 모양을 최대한 유지한다.
-  // "근처 점에 붙는" 반경도 3mm로 훨씬 좁게 써서, 구불구불한 곡선이
-  // 자기 자신과 가까워지는 구간(예: S자)에서 엉뚱하게 이전 점에
-  // 달라붙어 각지게 보이는 문제를 막는다 (탭/직선 닫기용 180mm 반경과는
-  // 별개). 조각마다 치수 라벨이 뜨면 지저분하니 라벨도 안 붙인다
-  // (치수는 실제로 "직선으로" 그은 선에만 표시된다). 점도 하나도 안
-  // 보여준다(시작/끝점 포함) — 손그림 느낌에는 점이 어울리지 않는다.
+  // 시작·끝점만 자석 스냅을 받고(도형 닫기), 중간 점은 3mm 반경으로만 병합한다.
+  // 조각마다 치수 라벨·점은 붙이지 않는다 — 손그림 느낌에는 어울리지 않는다.
   const FREEHAND_MIN_DIST = 0.001; // scene 단위 ≈ 1mm
   function commitFreehandStroke(rawPoints: THREE.Vector3[]) {
     if (rawPoints.length === 0) return;
@@ -1738,9 +2271,10 @@ export default function ProjectCanvas({
     }
     const last = rawPoints[rawPoints.length - 1];
     if (simplified[simplified.length - 1] !== last) simplified.push(last);
-    for (const p of simplified) {
-      commitDrawPointFromRaw(p, false, false, false, FREEHAND_NEARBY_THRESHOLD);
-    }
+    simplified.forEach((p, i) => {
+      if (i === 0 || i === simplified.length - 1) commitDrawPointFromRaw(p, false, false, false);
+      else commitDrawPoint(p, false, false, null, FREEHAND_NEARBY_THRESHOLD);
+    });
   }
 
   function handleDrawClick(clientX: number, clientY: number) {
@@ -1762,14 +2296,12 @@ export default function ProjectCanvas({
     const from = last ? activePointsRef.current.get(last) : null;
     const raw = mouse ? raycastToActivePlane(mouse.x, mouse.y) : null;
     if (!from || !raw) {
-      hideDrawPreview();
+      hidePreviewLine();
       return;
     }
-    const nearbyId = findNearbyActivePoint(raw);
-    const snappedRaw = nearbyId
-      ? vecMm(activePointsRef.current.get(nearbyId)!)
-      : applyOrthoSnap(applySnap(raw));
     const fromVec = vecMm(from);
+    const { pos: snappedRaw, hit } = resolveTarget(raw, { ortho: true, orthoRef: fromVec });
+    showSnapMarker(hit);
 
     let dir = snappedRaw.clone().sub(fromVec);
     if (dir.length() > 1e-6) {
@@ -1787,8 +2319,16 @@ export default function ProjectCanvas({
       ? fromVec.clone().add(dir.multiplyScalar(mmToScene(typed)))
       : snappedRaw;
 
+    setPreviewLine(fromVec, target);
+    const lengthMm = hasTyped ? Math.round(typed) : sceneToMm(fromVec.distanceTo(target));
+    setPreviewLabel(
+      fromVec.clone().add(target).multiplyScalar(0.5),
+      hasTyped ? `${lengthMm}mm ▎키보드 입력 중 (Enter)` : `${lengthMm}mm`
+    );
+  }
+  function setPreviewLine(a: THREE.Vector3, b: THREE.Vector3) {
     if (!previewLineRef.current) {
-      const geo = new THREE.BufferGeometry().setFromPoints([fromVec, target]);
+      const geo = new THREE.BufferGeometry().setFromPoints([a, b]);
       const mat = new THREE.LineDashedMaterial({
         color: SELECT_COLOR,
         dashSize: 0.08,
@@ -1798,32 +2338,23 @@ export default function ProjectCanvas({
       previewGroupRef.current?.add(line);
       previewLineRef.current = line;
     } else {
-      const posAttr = previewLineRef.current.geometry.attributes
-        .position as THREE.BufferAttribute;
-      posAttr.setXYZ(0, fromVec.x, fromVec.y, fromVec.z);
-      posAttr.setXYZ(1, target.x, target.y, target.z);
+      const posAttr = previewLineRef.current.geometry.attributes.position as THREE.BufferAttribute;
+      posAttr.setXYZ(0, a.x, a.y, a.z);
+      posAttr.setXYZ(1, b.x, b.y, b.z);
       posAttr.needsUpdate = true;
     }
     previewLineRef.current.computeLineDistances();
-
-    const lengthMm = hasTyped
-      ? Math.round(typed)
-      : distanceMm(
-          { x: from.x, y: from.y, z: from.z },
-          { x: sceneToMm(target.x), y: sceneToMm(target.y), z: sceneToMm(target.z) }
-        );
-    const mid = fromVec.clone().add(target).multiplyScalar(0.5);
+  }
+  function setPreviewLabel(pos: THREE.Vector3, text: string) {
     if (!previewLabelRef.current) {
       const label = new CSS2DObject(createLabelDiv(""));
       previewGroupRef.current?.add(label);
       previewLabelRef.current = label;
     }
-    previewLabelRef.current.position.copy(mid);
-    previewLabelRef.current.element.textContent = hasTyped
-      ? `${lengthMm}mm ▎키보드 입력 중 (Enter)`
-      : `${lengthMm}mm`;
+    previewLabelRef.current.position.copy(pos);
+    previewLabelRef.current.element.textContent = text;
   }
-  function hideDrawPreview() {
+  function hidePreviewLine() {
     if (previewLineRef.current) {
       previewGroupRef.current?.remove(previewLineRef.current);
       previewLineRef.current.geometry.dispose();
@@ -1834,6 +2365,9 @@ export default function ProjectCanvas({
       previewGroupRef.current?.remove(previewLabelRef.current);
       previewLabelRef.current = null;
     }
+  }
+  function hideDrawPreview() {
+    hidePreviewLine();
     lastPreviewDirRef.current = null;
     clearTypedLength();
     strokeActiveRef.current = false;
@@ -1841,6 +2375,8 @@ export default function ProjectCanvas({
     strokeStraightModeRef.current = false;
     clearHoldTimeout();
     hideFreehandPreview();
+    hideShapePreview();
+    hideSnapMarker();
   }
 
   // 손을 움직이지 않고 HOLD_MS 이상 멈춰 있으면 그 순간부터 직선
@@ -1861,11 +2397,17 @@ export default function ProjectCanvas({
   }
 
   // ── 손으로 그은 궤적 실시간 미리보기 (누른 채 이동할 때) ──────────
+  // 직선 모드면 시작~현재 두 점을 스냅된 위치로 잇고 길이도 보여준다.
   function updateFreehandPreview() {
     const pts = strokeRawPointsRef.current;
     if (pts.length < 2) return;
-    // 직선 모드로 전환됐으면 시작~현재 두 점만, 아니면 궤적 전체를 그대로.
-    const renderPts = strokeStraightModeRef.current ? [pts[0], pts[pts.length - 1]] : pts;
+    let renderPts = pts;
+    if (strokeStraightModeRef.current) {
+      const start = resolveTarget(pts[0]).pos;
+      const end = resolveTarget(pts[pts.length - 1], { ortho: true, orthoRef: start }).pos;
+      renderPts = [start, end];
+      setPreviewLabel(start.clone().add(end).multiplyScalar(0.5), `${sceneToMm(start.distanceTo(end))}mm`);
+    }
     if (!freehandLineRef.current) {
       const geo = new THREE.BufferGeometry().setFromPoints(renderPts);
       const mat = new THREE.LineBasicMaterial({ color: PENCIL });
@@ -1885,13 +2427,185 @@ export default function ProjectCanvas({
     freehandLineRef.current = null;
   }
 
+  // ── 사각형·원 그리기 ─────────────────────────────────────────────
+  function setShapeDims(next: { a: string; b: string; field: 0 | 1 }) {
+    shapeDimsRef.current = next;
+    setShapeDimsState(next);
+  }
+  function cancelShape() {
+    shapeStartRef.current = null;
+    shapeStartedThisDownRef.current = false;
+    lastShapeEndRef.current = null;
+    setShapePending(false);
+    setShapeDims({ a: "", b: "", field: 0 });
+    hideShapePreview();
+  }
+  function beginShape(start: THREE.Vector3) {
+    shapeStartRef.current = start.clone();
+    lastShapeEndRef.current = null;
+    setShapePending(true);
+    setShapeDims({ a: "", b: "", field: 0 });
+  }
+
+  // 첫 점과 현재 점(+직접 입력한 치수)으로 사각형/원 모양을 계산한다.
+  // 치수를 입력했으면 방향(부호)만 커서에서 가져오고 크기는 입력값을 쓴다.
+  function computeShape(end: THREE.Vector3 | null) {
+    const start = shapeStartRef.current;
+    if (!start || !activePlane) return null;
+    const endPos = end ?? start;
+    const dims = shapeDimsRef.current;
+    const a = parseFloat(dims.a);
+    const b = parseFloat(dims.b);
+    if (tool === "rect") {
+      const s = toLocalUV(activePlane, start);
+      const e = toLocalUV(activePlane, endPos);
+      let w = e.u - s.u;
+      let h = e.v - s.v;
+      if (a > 0) w = (w < 0 ? -1 : 1) * mmToScene(a);
+      if (b > 0) h = (h < 0 ? -1 : 1) * mmToScene(b);
+      const uv = [
+        [s.u, s.v],
+        [s.u + w, s.v],
+        [s.u + w, s.v + h],
+        [s.u, s.v + h],
+      ];
+      const corners = uv.map(([u, v]) => fromLocalUV(activePlane, u, v));
+      return { kind: "rect" as const, corners, wMm: Math.abs(sceneToMm(w)), hMm: Math.abs(sceneToMm(h)) };
+    }
+    if (tool === "circle") {
+      const r = a > 0 ? mmToScene(a / 2) : start.distanceTo(endPos);
+      const { uAxis, vAxis } = planeBasis(activePlane);
+      const pts: THREE.Vector3[] = [];
+      for (let i = 0; i < CIRCLE_SEGMENTS; i++) {
+        const t = (i / CIRCLE_SEGMENTS) * Math.PI * 2;
+        pts.push(
+          start
+            .clone()
+            .add(uAxis.clone().multiplyScalar(Math.cos(t) * r))
+            .add(vAxis.clone().multiplyScalar(Math.sin(t) * r))
+        );
+      }
+      return { kind: "circle" as const, center: start.clone(), points: pts, r, dMm: sceneToMm(r * 2) };
+    }
+    return null;
+  }
+
+  function updateShapePreview(end: THREE.Vector3 | null) {
+    const g = computeShape(end);
+    if (!g) {
+      hideShapePreview();
+      return;
+    }
+    const loopPts = g.kind === "rect" ? g.corners : g.points;
+    if (!shapePreviewRef.current) {
+      const mat = new THREE.LineDashedMaterial({ color: SELECT_COLOR, dashSize: 0.04, gapSize: 0.025 });
+      const loop = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(loopPts), mat);
+      previewGroupRef.current?.add(loop);
+      shapePreviewRef.current = loop;
+    } else {
+      shapePreviewRef.current.geometry.dispose();
+      shapePreviewRef.current.geometry = new THREE.BufferGeometry().setFromPoints(loopPts);
+    }
+    shapePreviewRef.current.computeLineDistances();
+
+    const dims = shapeDimsRef.current;
+    const mark = (field: 0 | 1, has: boolean) => (dims.field === field && has ? " ▎" : "");
+    const labels: { pos: THREE.Vector3; text: string }[] =
+      g.kind === "rect"
+        ? [
+            {
+              pos: g.corners[0].clone().add(g.corners[1]).multiplyScalar(0.5),
+              text: `가로 ${g.wMm}mm${mark(0, !!dims.a)}`,
+            },
+            {
+              pos: g.corners[1].clone().add(g.corners[2]).multiplyScalar(0.5),
+              text: `세로 ${g.hMm}mm${mark(1, !!dims.b)}`,
+            },
+          ]
+        : [
+            {
+              pos: g.points[0].clone(),
+              text: `Ø${g.dMm}mm${dims.a ? " ▎" : ""}`,
+            },
+          ];
+    while (shapePreviewLabelsRef.current.length > labels.length) {
+      previewGroupRef.current?.remove(shapePreviewLabelsRef.current.pop()!);
+    }
+    labels.forEach((l, i) => {
+      let obj = shapePreviewLabelsRef.current[i];
+      if (!obj) {
+        obj = new CSS2DObject(createLabelDiv(""));
+        previewGroupRef.current?.add(obj);
+        shapePreviewLabelsRef.current[i] = obj;
+      }
+      obj.position.copy(l.pos);
+      obj.element.textContent = l.text;
+    });
+  }
+  function hideShapePreview() {
+    if (shapePreviewRef.current) {
+      previewGroupRef.current?.remove(shapePreviewRef.current);
+      shapePreviewRef.current.geometry.dispose();
+      (shapePreviewRef.current.material as THREE.Material).dispose();
+      shapePreviewRef.current = null;
+    }
+    for (const l of shapePreviewLabelsRef.current) previewGroupRef.current?.remove(l);
+    shapePreviewLabelsRef.current = [];
+  }
+
+  // 사각형: 꼭짓점 4개(점 표시) + 변 4개, 치수는 아래 가로변·오른쪽 세로변에.
+  // 원: 72각형(점 표시 없음), 지름 치수 라벨 하나. 획 id 앞에 도형 종류를 붙인다.
+  function commitShape(end: THREE.Vector3 | null) {
+    const g = computeShape(end);
+    if (!g) return;
+    if (g.kind === "rect" && (g.wMm < 1 || g.hMm < 1)) return;
+    if (g.kind === "circle" && g.dMm < 2) return;
+    pushUndoSnapshot();
+    const strokeId = (g.kind === "rect" ? RECT_PREFIX : CIRCLE_PREFIX) + crypto.randomUUID();
+    const loopPts = g.kind === "rect" ? g.corners : g.points;
+    const showPoint = g.kind === "rect";
+    const ids = loopPts.map((pos) => {
+      const id = `tmp_${crypto.randomUUID()}`;
+      const rec: PointRec = {
+        id,
+        x: sceneToMm(pos.x),
+        y: sceneToMm(pos.y),
+        z: sceneToMm(pos.z),
+        isVertex: showPoint,
+      };
+      activePointsRef.current.set(id, rec);
+      if (showPoint) addActivePointMesh(id, rec);
+      return id;
+    });
+    const edges: EdgeRec[] = ids.map((fromId, i) => ({
+      id: `tmp_${crypto.randomUUID()}`,
+      fromId,
+      toId: ids[(i + 1) % ids.length],
+      strokeId,
+    }));
+    const labelIds =
+      g.kind === "rect" && activePlane
+        ? rectLabelEdgeIds(activePlane, edges, activePointsRef.current)
+        : null;
+    for (const e of edges) {
+      e.showLabel = !!labelIds?.has(e.id);
+      activeEdgesRef.current.set(e.id, e);
+      addActiveEdgeLine(e, e.showLabel);
+    }
+    if (g.kind === "circle") rebuildShapeLabels();
+    lastPointIdRef.current = null;
+    syncCounts();
+    dirtyRef.current = true;
+    cancelShape();
+  }
+
   // ── 키보드로 치수 직접 입력 (그리는 중, 숫자 입력 후 Enter) ──────
   function clearTypedLength() {
     typedLengthRef.current = "";
     setTypedLength("");
   }
   function handleDrawKeyDown(e: KeyboardEvent) {
-    if (mode !== "sketch" || tool !== "pen" || !lastPointIdRef.current) return;
+    if (mode !== "sketch" || tool !== "line" || !lastPointIdRef.current) return;
     if (/^[0-9.]$/.test(e.key)) {
       typedLengthRef.current += e.key;
       setTypedLength(typedLengthRef.current);
@@ -1913,6 +2627,32 @@ export default function ProjectCanvas({
       }
     }
   }
+  // 사각형: 숫자 → 가로, Tab 또는 쉼표로 세로 칸으로, Enter 확정. 원: 숫자 → 지름.
+  function handleShapeKeyDown(e: KeyboardEvent): boolean {
+    if (mode !== "sketch" || (tool !== "rect" && tool !== "circle") || !shapeStartRef.current) {
+      return false;
+    }
+    const dims = { ...shapeDimsRef.current };
+    const key = dims.field === 0 ? "a" : "b";
+    if (/^[0-9.]$/.test(e.key)) {
+      dims[key] += e.key;
+    } else if (e.key === "Backspace") {
+      e.preventDefault();
+      dims[key] = dims[key].slice(0, -1);
+    } else if ((e.key === "Tab" || e.key === ",") && tool === "rect") {
+      e.preventDefault();
+      dims.field = dims.field === 0 ? 1 : 0;
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      commitShape(lastShapeEndRef.current);
+      return true;
+    } else {
+      return false;
+    }
+    setShapeDims(dims);
+    updateShapePreview(lastShapeEndRef.current);
+    return true;
+  }
 
   // 격자 스냅이 켜져 있으면 좌표(mm)를 지정한 간격으로 반올림한다.
   function applySnap(target: THREE.Vector3): THREE.Vector3 {
@@ -1926,14 +2666,15 @@ export default function ProjectCanvas({
     );
   }
 
-  // 선을 그을 때 마지막 점(없으면 평면 원점) 기준으로 수평·수직에
-  // 가까우면 딱 맞춰주는 마그네틱 스냅.
-  function applyOrthoSnap(target: THREE.Vector3): THREE.Vector3 {
+  // 선을 그을 때 기준점(없으면 마지막 점, 그것도 없으면 스케치 원점) 기준으로
+  // 수평·수직에 가까우면 딱 맞춰주는 마그네틱 스냅.
+  function applyOrthoSnap(target: THREE.Vector3, ref?: THREE.Vector3): THREE.Vector3 {
     if (!activePlane) return target;
     const last = lastPointIdRef.current
       ? activePointsRef.current.get(lastPointIdRef.current)
       : null;
-    const refUV = last ? toLocalUV(activePlane, vecMm(last)) : { u: 0, v: 0 };
+    const refVec = ref ?? (last ? vecMm(last) : vecMm(sketchOriginMm(activePlane)));
+    const refUV = toLocalUV(activePlane, refVec);
     const targetUV = toLocalUV(activePlane, target);
     const snappedUV = orthoSnapLocal(refUV, targetUV);
     return fromLocalUV(activePlane, snappedUV.u, snappedUV.v);
@@ -2066,7 +2807,11 @@ export default function ProjectCanvas({
       strokeStraightModeRef.current = false;
       clearHoldTimeout();
       hideFreehandPreview();
+      hidePreviewLine();
     }
+    // 방금 누른 손가락으로 시작한 사각형/원은 취소(탭으로 첫 점만 찍어둔 상태는 유지)
+    if (shapeStartedThisDownRef.current) cancelShape();
+    hideSnapMarker();
   }
 
   // 오빗컨트롤(OrbitControls)의 pan()과 같은 방식으로, 화면 픽셀 이동량을
@@ -2120,6 +2865,7 @@ export default function ProjectCanvas({
     // 마우스 가운데(회전)/오른쪽(이동) 버튼은 화면 조작 전용 — 점·선을
     // 잡거나 선택하면 안 된다. 왼쪽 버튼(0)만 그리기/선택에 쓴다.
     if (e.pointerType === "mouse" && e.button !== 0) return;
+    lastPointerTypeRef.current = e.pointerType;
     pointerPositionsRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     activePointerIdsRef.current.add(e.pointerId);
     if (activePointerIdsRef.current.size !== 3) panCentroidRef.current = null;
@@ -2137,30 +2883,35 @@ export default function ProjectCanvas({
       return;
     }
 
-    if (mode === "sketch" && tool === "move") {
-      const target = raycastToActivePlane(e.clientX, e.clientY);
-      if (target) {
-        // 화면에 보이는 꼭짓점만 잡는다. 자유곡선 내부 보간점을 잡으면
-        // 곡선에서 뾰족하게 한 점만 튀어나오는 문제가 생긴다.
-        const pointId = findNearbyActivePoint(target, NEARBY_POINT_THRESHOLD, true);
-        if (pointId) {
-          pushUndoSnapshot();
-          draggingPointIdRef.current = pointId;
-          e.currentTarget.setPointerCapture(e.pointerId);
-        }
-      }
-    } else if (mode === "sketch" && tool === "pen" && !chainMode) {
-      const raw = raycastToActivePlane(e.clientX, e.clientY);
-      if (raw) {
-        // 이어그리기가 꺼져 있으면 매번 새로운 독립된 선으로 시작한다 —
-        // 이전 스트로크의 끝점에 자동으로 이어붙지 않도록 체인을 끊는다.
-        lastPointIdRef.current = null;
-        strokeActiveRef.current = true;
-        strokeRawPointsRef.current = [raw.clone()];
-        strokeStraightModeRef.current = straightMode;
-        if (!straightMode) scheduleHoldTimeout();
+    if (mode !== "sketch") return;
+    const raw = raycastToActivePlane(e.clientX, e.clientY);
+    if (!raw) return;
+    if (tool === "select") {
+      // 화면에 보이는 꼭짓점만 잡는다. 자유곡선 내부 보간점을 잡으면
+      // 곡선에서 뾰족하게 한 점만 튀어나오는 문제가 생긴다.
+      const pointId = findNearbyActivePoint(raw, undefined, true);
+      if (pointId) {
+        pushUndoSnapshot();
+        draggingPointIdRef.current = pointId;
         e.currentTarget.setPointerCapture(e.pointerId);
       }
+    } else if (tool === "free" || (tool === "line" && !chainMode)) {
+      // 매번 새로운 독립된 선으로 시작한다 — 이전 선의 끝점에 자동으로
+      // 이어붙지 않도록 체인을 끊는다(붙이고 싶으면 자석 스냅이 붙여준다).
+      lastPointIdRef.current = null;
+      strokeActiveRef.current = true;
+      strokeRawPointsRef.current = [raw.clone()];
+      strokeStraightModeRef.current = tool === "line";
+      if (tool === "free") scheduleHoldTimeout();
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } else if (tool === "rect" || tool === "circle") {
+      if (!shapeStartRef.current) {
+        beginShape(resolveTarget(raw).pos);
+        shapeStartedThisDownRef.current = true;
+      } else {
+        shapeStartedThisDownRef.current = false;
+      }
+      e.currentTarget.setPointerCapture(e.pointerId);
     }
   }
 
@@ -2212,6 +2963,7 @@ export default function ProjectCanvas({
     if (draggingPointIdRef.current) {
       const draggedId = draggingPointIdRef.current;
       draggingPointIdRef.current = null;
+      hideSnapMarker();
       const wasTap = down && isTap(down, { x: e.clientX, y: e.clientY });
       if (wasTap) {
         undoStackRef.current.pop(); // 실제로 안 움직였으니 미리 찍어둔 스냅샷은 버린다
@@ -2222,7 +2974,21 @@ export default function ProjectCanvas({
       return;
     }
 
-    if (mode === "sketch" && tool === "pen" && strokeActiveRef.current) {
+    if (mode === "sketch" && (tool === "rect" || tool === "circle") && shapeStartRef.current) {
+      const wasTap = !!down && isTap(down, { x: e.clientX, y: e.clientY });
+      const startedNow = shapeStartedThisDownRef.current;
+      shapeStartedThisDownRef.current = false;
+      // 첫 점만 탭했으면 두 번째 점(대각선 꼭짓점/크기)을 기다린다.
+      if (startedNow && wasTap) return;
+      const raw = raycastToActivePlane(e.clientX, e.clientY);
+      const end = raw ? resolveTarget(raw).pos : lastShapeEndRef.current;
+      hideSnapMarker();
+      commitShape(end);
+      if (shapeStartRef.current) cancelShape(); // 크기가 0이라 안 그려졌으면 정리
+      return;
+    }
+
+    if (mode === "sketch" && (tool === "free" || tool === "line") && strokeActiveRef.current) {
       strokeActiveRef.current = false;
       clearHoldTimeout();
       const rawPoints = strokeRawPointsRef.current;
@@ -2230,6 +2996,8 @@ export default function ProjectCanvas({
       strokeRawPointsRef.current = [];
       strokeStraightModeRef.current = false;
       hideFreehandPreview();
+      hidePreviewLine();
+      hideSnapMarker();
       if (rawPoints.length === 0) return;
 
       const wasTap = down && isTap(down, { x: e.clientX, y: e.clientY });
@@ -2237,10 +3005,10 @@ export default function ProjectCanvas({
         // 이어그리기가 꺼져 있으면 탭 한 번으로는 아무것도 그리지 않는다
         // (선으로 이어지지도 않는 외톨이 점만 남는 걸 막기 위해).
       } else if (wasStraight) {
-        // 직선 모드(체크박스 또는 1초 멈춤으로 전환) → 시작점~끝점 직선.
+        // 직선 도구 또는 1초 멈춤으로 전환 → 시작점~끝점 직선.
         // 드래그로 그은 선이라 점은 안 보여주고 치수만 보여준다.
         pushUndoSnapshot();
-        commitDrawPointFromRaw(rawPoints[0], true, true, false);
+        commitDrawPointFromRaw(rawPoints[0], false, true, false);
         commitDrawPointFromRaw(rawPoints[rawPoints.length - 1], true, true, false);
       } else {
         // 자유곡선 그대로(삐뚤빼뚤 유지) → 궤적을 따라 여러 점으로 커밋
@@ -2254,8 +3022,8 @@ export default function ProjectCanvas({
     if (!isTap(down, { x: e.clientX, y: e.clientY })) return; // 드래그(회전)로 판단, 무시
 
     if (mode === "sketch") {
-      if (tool === "pen" && chainMode) handleDrawClick(e.clientX, e.clientY);
-      else if (tool === "move") handleActiveEdgeTap(e.clientX, e.clientY);
+      if (tool === "line" && chainMode) handleDrawClick(e.clientX, e.clientY);
+      else if (tool === "select") handleActiveEdgeTap(e.clientX, e.clientY);
       return;
     }
     if (planeTool) {
@@ -2301,36 +3069,66 @@ export default function ProjectCanvas({
     if (mode !== "sketch") return;
     if (activePointerIdsRef.current.size > 1) return; // 두 손가락 제스처 중엔 관여하지 않는다
 
+    lastPointerTypeRef.current = e.pointerType;
+    const toMm = (v: THREE.Vector3) => ({ x: sceneToMm(v.x), y: sceneToMm(v.y), z: sceneToMm(v.z) });
+
     if (draggingPointIdRef.current) {
-      const target = raycastToActivePlane(e.clientX, e.clientY);
-      if (!target) return;
-      movePointTo(draggingPointIdRef.current, target);
-      setCursorMm({ x: sceneToMm(target.x), y: sceneToMm(target.y), z: sceneToMm(target.z) });
+      const raw = raycastToActivePlane(e.clientX, e.clientY);
+      if (!raw) return;
+      const id = draggingPointIdRef.current;
+      // 사각형 꼭짓점이면 직사각형을 유지하며 늘리고, 자기 도형에는 안 붙게 뺀다.
+      const rect = rectOfPoint(id);
+      const exclude = new Set(rect ? rect.corners.map((c) => c.id) : [id]);
+      const hit = findObjectSnap(raw, exclude);
+      showSnapMarker(hit);
+      if (rect) moveRectCorner(rect, id, hit ? hit.pos : applySnap(raw));
+      else if (hit) setPointPos(id, hit.pos);
+      else movePointTo(id, raw);
+      setCursorMm(toMm(hit ? hit.pos : raw));
       return;
     }
 
-    if (tool !== "pen") return;
+    if (tool === "select") return;
     const raw = raycastToActivePlane(e.clientX, e.clientY);
     if (!raw) return;
 
-    if (strokeActiveRef.current) {
-      strokeRawPointsRef.current.push(raw.clone());
-      // 직선 모드가 아니면 계속 움직이는 동안은 멈춤 타이머를 계속 미룬다
-      // (1초 이상 안 움직이면 그때 직선 모드로 전환됨)
-      if (!straightMode && !strokeStraightModeRef.current) scheduleHoldTimeout();
-      updateFreehandPreview();
-      setCursorMm({ x: sceneToMm(raw.x), y: sceneToMm(raw.y), z: sceneToMm(raw.z) });
+    if (tool === "rect" || tool === "circle") {
+      const { pos, hit } = resolveTarget(raw);
+      showSnapMarker(hit);
+      if (shapeStartRef.current) {
+        lastShapeEndRef.current = pos;
+        updateShapePreview(pos);
+      }
+      setCursorMm(toMm(pos));
       return;
     }
 
-    const target = applyOrthoSnap(applySnap(raw));
-    setCursorMm({ x: sceneToMm(target.x), y: sceneToMm(target.y), z: sceneToMm(target.z) });
-    if (lastPointIdRef.current) updateDrawPreview(e.clientX, e.clientY);
+    if (strokeActiveRef.current) {
+      strokeRawPointsRef.current.push(raw.clone());
+      // 자유 그리기는 계속 움직이는 동안 멈춤 타이머를 계속 미룬다
+      // (1초 이상 안 움직이면 그때 직선으로 전환됨)
+      if (tool === "free" && !strokeStraightModeRef.current) scheduleHoldTimeout();
+      updateFreehandPreview();
+      showSnapMarker(findObjectSnap(raw));
+      setCursorMm(toMm(raw));
+      return;
+    }
+
+    if (lastPointIdRef.current) {
+      updateDrawPreview(e.clientX, e.clientY);
+    } else {
+      showSnapMarker(findObjectSnap(raw));
+    }
+    setCursorMm(toMm(resolveTarget(raw, { ortho: !!lastPointIdRef.current }).pos));
   }
 
-  function handleSetTool(next: "pen" | "move") {
+  function handleSetTool(next: Tool) {
+    // 선택 → 그리기 도구로 바꿀 때만 평면 정면으로 카메라를 맞춘다
+    // (그리기 도구끼리 바꿀 때는 보던 화면을 유지).
+    if (tool === "select" && next !== "select" && activePlane) snapCameraFlat(activePlane);
     setTool(next);
-    if (activePlane) snapCameraFlat(activePlane);
+    cancelShape();
+    lastPointIdRef.current = null;
     hideDrawPreview();
     selectActivePoint(null);
   }
@@ -2344,6 +3142,7 @@ export default function ProjectCanvas({
   function handleCanvasContextMenu(e: React.MouseEvent) {
     if (mode !== "sketch") return;
     e.preventDefault();
+    cancelShape();
     handleNewStroke();
   }
   useEffect(() => {
@@ -2381,14 +3180,25 @@ export default function ProjectCanvas({
       }
 
       if (e.key === "Escape") {
+        cancelShape();
         handleNewStroke();
         selectActivePoint(null);
         return;
       }
-      if (e.key === "Delete" || (e.key === "Backspace" && tool === "move")) {
+      // 사각형·원 치수 입력(숫자, Tab/쉼표, Backspace, Enter)
+      if (handleShapeKeyDown(e)) return;
+      if (e.key === "Delete" || (e.key === "Backspace" && tool === "select")) {
         e.preventDefault();
         handleDeleteSelection();
         return;
+      }
+      // 도구 단축키 V·P·L·R·C
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        const def = TOOL_DEFS.find((t) => t.key === e.key.toLowerCase());
+        if (def) {
+          handleSetTool(def.id);
+          return;
+        }
       }
       handleDrawKeyDown(e);
     }
@@ -2708,48 +3518,85 @@ export default function ProjectCanvas({
                   .flatMap((p) => p.sketches)
                   .find((s) => s.id === activeSketchId)?.name}
               </span>
-              <button
-                onClick={() => handleSetTool(tool === "pen" ? "move" : "pen")}
-                className={`text-xs px-2.5 py-1.5 rounded-md border ${
-                  tool === "pen"
-                    ? "bg-gray-900 text-white border-gray-900"
-                    : "bg-white text-gray-600 border-gray-300"
-                }`}
-                title={
-                  tool === "pen"
-                    ? "끄면 그린 점·선을 수정할 수 있어요"
-                    : "켜면 이어서 선을 그릴 수 있어요"
-                }
-              >
-                {tool === "pen" ? "✎ 그리는 중" : "✥ 수정 중 (그리기 켜기)"}
-              </button>
+              <div className="flex items-center gap-0.5 rounded-lg border border-gray-300 bg-white p-0.5">
+                {TOOL_DEFS.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => handleSetTool(t.id)}
+                    title={t.title}
+                    aria-label={t.title}
+                    aria-pressed={tool === t.id}
+                    className={`w-9 h-9 flex items-center justify-center rounded-md ${
+                      tool === t.id ? "bg-gray-900 text-white" : "text-gray-600 hover:bg-gray-100"
+                    }`}
+                  >
+                    <ToolIcon kind={t.id} />
+                  </button>
+                ))}
+              </div>
 
-              {tool === "pen" && (
-                <>
-                  <label
-                    className="flex items-center gap-1 text-xs text-gray-500 px-1"
-                    title="켜면 탭으로 점을 찍어서 잇는 기존 방식"
+              {tool === "line" && (
+                <label
+                  className="flex items-center gap-1 text-xs text-gray-500 px-1"
+                  title="켜면 탭으로 점을 찍어서 잇는 방식(오토캐드식)"
+                >
+                  <input
+                    type="checkbox"
+                    checked={chainMode}
+                    onChange={(e) => {
+                      setChainMode(e.target.checked);
+                      handleNewStroke();
+                    }}
+                  />
+                  이어그리기
+                </label>
+              )}
+
+              {(tool === "rect" || tool === "circle") && shapePending && (
+                <div className="flex items-center gap-1.5 text-xs bg-white border border-orange-300 rounded-md px-2.5 py-1">
+                  {(tool === "rect"
+                    ? ([
+                        ["가로", 0],
+                        ["세로", 1],
+                      ] as const)
+                    : ([["지름", 0]] as const)
+                  ).map(([name, field]) => (
+                    <label key={name} className="flex items-center gap-1 text-gray-500">
+                      {name}
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        value={field === 0 ? shapeDims.a : shapeDims.b}
+                        placeholder="자유"
+                        onFocus={() => setShapeDims({ ...shapeDimsRef.current, field })}
+                        onChange={(e) => {
+                          const next = { ...shapeDimsRef.current, field };
+                          if (field === 0) next.a = e.target.value;
+                          else next.b = e.target.value;
+                          setShapeDims(next);
+                          updateShapePreview(lastShapeEndRef.current);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") commitShape(lastShapeEndRef.current);
+                          if (e.key === "Escape") cancelShape();
+                        }}
+                        className={`w-16 border rounded px-1.5 py-1 ${
+                          shapeDims.field === field ? "border-orange-400" : "border-gray-300"
+                        }`}
+                      />
+                    </label>
+                  ))}
+                  <span className="text-gray-400">mm</span>
+                  <button
+                    onClick={() => commitShape(lastShapeEndRef.current)}
+                    className="px-2 py-1 rounded bg-gray-900 text-white"
                   >
-                    <input
-                      type="checkbox"
-                      checked={chainMode}
-                      onChange={(e) => setChainMode(e.target.checked)}
-                    />
-                    이어그리기
-                  </label>
-                  <label
-                    className="flex items-center gap-1 text-xs text-gray-500 px-1"
-                    title="켜면 누른 채 그은 궤적과 무관하게 항상 시작~끝 직선으로 그려짐"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={straightMode}
-                      disabled={chainMode}
-                      onChange={(e) => setStraightMode(e.target.checked)}
-                    />
-                    직선으로 그리기
-                  </label>
-                </>
+                    확정
+                  </button>
+                  <button onClick={cancelShape} className="px-2 py-1 rounded text-gray-400">
+                    취소
+                  </button>
+                </div>
               )}
 
               <label className="flex items-center gap-1 text-xs text-gray-500 px-1">
@@ -2801,7 +3648,7 @@ export default function ProjectCanvas({
                 </div>
               )}
 
-              {chainMode && (
+              {tool === "line" && chainMode && (
                 <button
                   onClick={handleNewStroke}
                   className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
@@ -2872,15 +3719,34 @@ export default function ProjectCanvas({
               <span>
                 선 {strokeCount}개 · 점 {pointCount}개
               </span>
-              {cursorMm && (
-                <span>
-                  커서: {cursorMm.x}, {cursorMm.y}, {cursorMm.z} mm
-                </span>
-              )}
-              {tool === "move" && (
-                <span>점을 끌어서 이동, 선을 탭하면 그 선(한 획) 전체가 선택됩니다. Delete 키로 지우기.</span>
-              )}
-              {tool === "pen" && typedLength && (
+              {cursorMm && activePlane && (() => {
+                // 스케치 원점(0,0) 기준 가로·세로 좌표
+                const o = toLocalUV(activePlane, vecMm(sketchOriginMm(activePlane)));
+                const c = toLocalUV(activePlane, vecMm(cursorMm));
+                return (
+                  <span>
+                    커서: 가로 {sceneToMm(c.u - o.u)}, 세로 {sceneToMm(c.v - o.v)} mm
+                  </span>
+                );
+              })()}
+              <span>
+                {tool === "select"
+                  ? "점을 끌어서 이동(사각형은 모양 유지), 선을 탭하면 그 선(한 획) 전체가 선택됩니다. Delete 키로 지우기."
+                  : tool === "free"
+                    ? "누른 채 그으면 그대로 곡선 · 1초 멈추면 직선으로 바뀝니다 · 점·선·원점에 자석처럼 붙습니다"
+                    : tool === "line"
+                      ? chainMode
+                        ? "탭으로 점을 찍어 잇기 · 숫자 입력 후 Enter로 정확한 길이 · Esc로 끊기"
+                        : "누른 채 끌어서 직선 · 점·선·원점에 자석처럼 붙습니다"
+                      : shapePending
+                        ? tool === "rect"
+                          ? "대각선 꼭짓점을 탭하세요 · 숫자 입력(Tab으로 가로/세로 전환) 후 Enter · Esc 취소"
+                          : "크기를 정할 점을 탭하세요 · 지름 입력 후 Enter · Esc 취소"
+                        : tool === "rect"
+                          ? "첫 꼭짓점을 탭하거나, 누른 채 대각선으로 끌어서 그리세요"
+                          : "중심을 탭하거나, 중심에서 누른 채 끌어서 그리세요"}
+              </span>
+              {tool === "line" && typedLength && (
                 <span className="text-gray-600">
                   숫자 입력 중: {typedLength}mm (Enter로 확정, Esc로 취소)
                 </span>
