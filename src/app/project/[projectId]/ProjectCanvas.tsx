@@ -1049,12 +1049,6 @@ export default function ProjectCanvas({
     }
   }
 
-  // 오버뷰에서 평면을 탭하면 "선택"만 하지 않고 바로 새 스케치를
-  // 만들어 그리기 모드로 들어간다 (트리에는 "Line N"으로 추가됨).
-  async function handleQuickDrawOnPlane(plane: PlaneData) {
-    await handleCreateSketch(plane);
-  }
-
   async function handleDeleteSketch(sketch: SketchData) {
     if (!confirm(`"${sketch.name}" 스케치를 삭제할까요? 되돌릴 수 없습니다.`)) return;
     setBusy(true);
@@ -1600,7 +1594,7 @@ export default function ProjectCanvas({
       setSelectedEdge(null);
       if (!allowPlane) return;
       const plane = planes.find((p) => p.id === obj.userData.planeId);
-      if (plane && !busy) handleQuickDrawOnPlane(plane);
+      if (plane && !busy) setSelectedPlaneId(plane.id);
     } else if (obj.userData.kind === "edge") {
       setSelectedEdge({
         edgeId: obj.userData.edgeId,
@@ -2903,7 +2897,7 @@ export default function ProjectCanvas({
                 ? connectFrom
                   ? "이을 끝점을 탭하세요 (빈 곳 탭 또는 Esc로 취소)"
                   : "시작할 점(선 끝점 등)을 탭하세요 · 선을 탭하면 선택"
-                : "평면을 탭하면 새 스케치, 선을 탭하면 선택됩니다."}
+                : "평면이나 선을 탭하면 선택됩니다."}
             </span>
           )}
           {pendingSaves > 0 && <span className="text-amber-700">저장 중…</span>}
