@@ -22,7 +22,7 @@ import {
 type Vec3 = { x: number; y: number; z: number };
 type Axis = "XY" | "YZ" | "XZ";
 type PointRec = { id: string; x: number; y: number; z: number; isVertex?: boolean };
-type EdgeRec = { id: string; fromId: string; toId: string };
+type EdgeRec = { id: string; fromId: string; toId: string; showLabel?: boolean };
 type SketchData = { id: string; name: string; points: PointRec[]; edges: EdgeRec[] };
 type PlaneData = {
   id: string;
@@ -244,6 +244,11 @@ export default function ProjectCanvas({
   const activeEdgeLinesRef = useRef<Map<string, Line2>>(new Map());
   const activeEdgeLabelsRef = useRef<Map<string, CSS2DObject>>(new Map());
   const activePointsRef = useRef<Map<string, PointRec>>(new Map());
+  // 실행 취소용 스냅샷 스택. 점 하나가 아니라 "동작 하나"(선 하나 긋기,
+  // 점 드래그 하나, 삭제 하나 등) 단위로 직전 상태 전체를 저장해뒀다가
+  // 되돌린다 — 자유곡선처럼 점이 여러 개 생기는 동작도 한 번에 되돌아가게.
+  const undoStackRef = useRef<{ points: PointRec[]; edges: EdgeRec[] }[]>([]);
+  const UNDO_STACK_LIMIT = 50;
   const activeEdgesRef = useRef<Map<string, EdgeRec>>(new Map());
   const lastPointIdRef = useRef<string | null>(null);
   const dirtyRef = useRef(false);
@@ -700,6 +705,34 @@ export default function ProjectCanvas({
     lastPointIdRef.current = null;
   }
 
+  // 지금 그려진 점/선 상태를 실행 취소 스택에 저장해둔다. 실제로 뭔가를
+  // 바꾸는 동작(선 긋기, 점 드래그, 삭제 등) 직전에 호출한다.
+  function pushUndoSnapshot() {
+    const points = [...activePointsRef.current.values()].map((p) => ({ ...p }));
+    const edges = [...activeEdgesRef.current.values()].map((e) => ({ ...e }));
+    undoStackRef.current.push({ points, edges });
+    if (undoStackRef.current.length > UNDO_STACK_LIMIT) undoStackRef.current.shift();
+  }
+
+  function handleUndo() {
+    const snap = undoStackRef.current.pop();
+    if (!snap) return;
+    hideDrawPreview();
+    clearActiveGeometry();
+    for (const p of snap.points) {
+      activePointsRef.current.set(p.id, p);
+      if (p.isVertex !== false) addActivePointMesh(p.id, p);
+    }
+    for (const e of snap.edges) {
+      activeEdgesRef.current.set(e.id, e);
+      addActiveEdgeLine(e, e.showLabel ?? true);
+    }
+    setPointCount(activePointsRef.current.size);
+    setEdgeCount(activeEdgesRef.current.size);
+    dirtyRef.current = true;
+    selectActivePoint(null);
+  }
+
   // ── 스케치 진입 시 그리드 + 카메라 정면 뷰 ─────────────────────
   useEffect(() => {
     const scene = sceneRef.current;
@@ -761,12 +794,13 @@ export default function ProjectCanvas({
   // 않게), 방금 만든 빈 스케치는 바로 그릴 수 있게 "그리기" 상태로 연다.
   function enterSketch(plane: PlaneData, sketch: SketchData, startTool: "pen" | "move" = "move") {
     clearActiveGeometry();
+    undoStackRef.current = [];
     for (const p of sketch.points) activePointsRef.current.set(p.id, p);
     for (const e of sketch.edges) activeEdgesRef.current.set(e.id, e);
     for (const [id, p] of activePointsRef.current) {
       if (p.isVertex !== false) addActivePointMesh(id, p);
     }
-    for (const [, e] of activeEdgesRef.current) addActiveEdgeLine(e);
+    for (const [, e] of activeEdgesRef.current) addActiveEdgeLine(e, e.showLabel ?? true);
     setPointCount(activePointsRef.current.size);
     setEdgeCount(activeEdgesRef.current.size);
     dirtyRef.current = false;
@@ -791,6 +825,7 @@ export default function ProjectCanvas({
       await saveCurrentSketch();
     }
     clearActiveGeometry();
+    undoStackRef.current = [];
     hideDrawPreview();
     draggingPointIdRef.current = null;
     setSelectedPointId(null);
@@ -992,7 +1027,7 @@ export default function ProjectCanvas({
     const last = lastPointIdRef.current;
     if (last && last !== pointId) {
       const edgeId = `tmp_${crypto.randomUUID()}`;
-      const rec: EdgeRec = { id: edgeId, fromId: last, toId: pointId };
+      const rec: EdgeRec = { id: edgeId, fromId: last, toId: pointId, showLabel };
       activeEdgesRef.current.set(edgeId, rec);
       addActiveEdgeLine(rec, showLabel);
       setEdgeCount(activeEdgesRef.current.size);
@@ -1048,6 +1083,7 @@ export default function ProjectCanvas({
   function handleDrawClick(clientX: number, clientY: number) {
     const raw = raycastToActivePlane(clientX, clientY);
     if (!raw) return;
+    pushUndoSnapshot();
     commitDrawPointFromRaw(raw);
   }
 
@@ -1208,6 +1244,7 @@ export default function ProjectCanvas({
       const dir = lastPreviewDirRef.current;
       if (from && dir && !Number.isNaN(value) && value > 0) {
         const target = vecMm(from).add(dir.clone().multiplyScalar(mmToScene(value)));
+        pushUndoSnapshot();
         commitDrawPoint(target);
         updateDrawPreview();
       }
@@ -1295,6 +1332,7 @@ export default function ProjectCanvas({
   }
   function handleDeleteSelectedPoint() {
     if (!selectedPointId) return;
+    pushUndoSnapshot();
     const id = selectedPointId;
     for (const [eid, e] of [...activeEdgesRef.current]) {
       if (e.fromId !== id && e.toId !== id) continue;
@@ -1311,6 +1349,7 @@ export default function ProjectCanvas({
   }
   function handleDeleteSelectedEdge() {
     if (!selectedActiveEdgeId) return;
+    pushUndoSnapshot();
     removeActiveEdgeLine(selectedActiveEdgeId);
     activeEdgesRef.current.delete(selectedActiveEdgeId);
     setEdgeCount(activeEdgesRef.current.size);
@@ -1404,6 +1443,7 @@ export default function ProjectCanvas({
       if (target) {
         const pointId = findNearbyActivePoint(target);
         if (pointId) {
+          pushUndoSnapshot();
           draggingPointIdRef.current = pointId;
           e.currentTarget.setPointerCapture(e.pointerId);
         }
@@ -1464,6 +1504,7 @@ export default function ProjectCanvas({
       draggingPointIdRef.current = null;
       const wasTap = down && isTap(down, { x: e.clientX, y: e.clientY });
       if (wasTap) {
+        undoStackRef.current.pop(); // 실제로 안 움직였으니 미리 찍어둔 스냅샷은 버린다
         selectActivePoint(draggedId); // 거의 안 움직였으면 이동이 아니라 "선택"으로 처리
       } else {
         dirtyRef.current = true;
@@ -1488,10 +1529,12 @@ export default function ProjectCanvas({
       } else if (wasStraight) {
         // 직선 모드(체크박스 또는 1초 멈춤으로 전환) → 시작점~끝점 직선.
         // 드래그로 그은 선이라 점은 안 보여주고 치수만 보여준다.
+        pushUndoSnapshot();
         commitDrawPointFromRaw(rawPoints[0], true, true, false);
         commitDrawPointFromRaw(rawPoints[rawPoints.length - 1], true, true, false);
       } else {
         // 자유곡선 그대로(삐뚤빼뚤 유지) → 궤적을 따라 여러 점으로 커밋
+        pushUndoSnapshot();
         commitFreehandStroke(rawPoints);
       }
       return;
@@ -1596,28 +1639,9 @@ export default function ProjectCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, tool]);
 
-  function handleUndo() {
-    const last = lastPointIdRef.current;
-    if (!last) return;
-    for (const [eid, e] of activeEdgesRef.current) {
-      if (e.toId === last || e.fromId === last) {
-        removeActiveEdgeLine(eid);
-        activeEdgesRef.current.delete(eid);
-      }
-    }
-    if (activePointsRef.current.get(last)?.id.startsWith("tmp_")) {
-      removeActivePointMesh(last);
-      activePointsRef.current.delete(last);
-    }
-    setPointCount(activePointsRef.current.size);
-    setEdgeCount(activeEdgesRef.current.size);
-    lastPointIdRef.current = null;
-    hideDrawPreview();
-    dirtyRef.current = true;
-  }
-
   function handleClearAll() {
-    if (!confirm("현재 스케치의 모든 점과 선을 지울까요? (저장 전까지는 되돌릴 수 있습니다)")) return;
+    if (!confirm("현재 스케치의 모든 점과 선을 지울까요? (실행 취소로 되돌릴 수 있습니다)")) return;
+    pushUndoSnapshot();
     clearActiveGeometry();
     hideDrawPreview();
     setSelectedPointId(null);
