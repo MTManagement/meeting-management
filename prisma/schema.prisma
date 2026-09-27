@@ -63,8 +63,9 @@ model Sketch {
   id        String   @id @default(cuid())
   projectId String
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  planeId   String
-  plane     Plane    @relation(fields: [planeId], references: [id], onDelete: Cascade)
+  // 평면 없는 스케치 = 오버뷰에서 여러 스케치의 점을 잇는 3D 연결선 모음
+  planeId   String?
+  plane     Plane?   @relation(fields: [planeId], references: [id], onDelete: Cascade)
   name      String
   createdAt DateTime @default(now())
 
@@ -106,6 +107,8 @@ model Edge {
   from      Point    @relation("EdgeFrom", fields: [fromId], references: [id], onDelete: Cascade)
   toId      String
   to        Point    @relation("EdgeTo", fields: [toId], references: [id], onDelete: Cascade)
+  // 한 번에 그은 선(획) 단위 묶음. 같은 strokeId끼리 한 개체로 선택·삭제된다.
+  strokeId  String?
   groupId   String?
   group     Group?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
   createdAt DateTime @default(now())

@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
+import { randomUUID } from "crypto";
 
 type Vec3 = { x: number; y: number; z: number };
 
@@ -168,9 +169,11 @@ export async function deleteSketch(projectId: string, sketchId: string) {
 }
 
 type PointInput = { id: string; x: number; y: number; z: number; isVertex?: boolean };
-type EdgeInput = { fromId: string; toId: string };
+type EdgeInput = { fromId: string; toId: string; strokeId?: string | null };
 
-// 스케치 하나(평면 하나에 종속된 점/선 묶음)의 내용을 통째로 저장한다.
+// 스케치 하나의 점/선을 통째로 교체 저장한다. 점을 하나씩 순서대로
+// 넣으면 자유곡선처럼 점이 수백 개일 때 트랜잭션 제한시간을 넘겨 저장이
+// 실패했기 때문에, id를 미리 만들어 createMany로 한 번에 넣는다.
 export async function saveSketchGeometry(
   projectId: string,
   sketchId: string,
@@ -183,34 +186,46 @@ export async function saveSketchGeometry(
     throw new Error("스케치를 찾을 수 없습니다.");
   }
 
-  const saved = await prisma.$transaction(async (tx) => {
-    await tx.edge.deleteMany({ where: { sketchId } });
-    await tx.point.deleteMany({ where: { sketchId } });
+  const idMap = new Map<string, string>();
+  for (const p of points) idMap.set(p.id, randomUUID());
 
-    const idMap = new Map<string, string>();
-    for (const p of points) {
-      const created = await tx.point.create({
-        data: { projectId, sketchId, x: p.x, y: p.y, z: p.z, isVertex: p.isVertex ?? true },
-      });
-      idMap.set(p.id, created.id);
-    }
+  const edgeRows = [];
+  for (const e of edges) {
+    const fromId = idMap.get(e.fromId);
+    const toId = idMap.get(e.toId);
+    if (!fromId || !toId) continue;
+    edgeRows.push({ projectId, sketchId, fromId, toId, strokeId: e.strokeId ?? null });
+  }
 
-    for (const e of edges) {
-      const fromId = idMap.get(e.fromId);
-      const toId = idMap.get(e.toId);
-      if (!fromId || !toId) continue;
-      await tx.edge.create({ data: { projectId, sketchId, fromId, toId } });
-    }
+  await prisma.$transaction([
+    prisma.edge.deleteMany({ where: { sketchId } }),
+    prisma.point.deleteMany({ where: { sketchId } }),
+    prisma.point.createMany({
+      data: points.map((p) => ({
+        id: idMap.get(p.id)!,
+        projectId,
+        sketchId,
+        x: p.x,
+        y: p.y,
+        z: p.z,
+        isVertex: p.isVertex ?? true,
+      })),
+    }),
+    prisma.edge.createMany({ data: edgeRows }),
+    prisma.project.update({ where: { id: projectId }, data: { updatedAt: new Date() } }),
+  ]);
 
-    await tx.project.update({
-      where: { id: projectId },
-      data: { updatedAt: new Date() },
-    });
+  return { ok: true };
+}
 
-    const newPoints = await tx.point.findMany({ where: { sketchId } });
-    const newEdges = await tx.edge.findMany({ where: { sketchId } });
-    return { points: newPoints, edges: newEdges };
+// 오버뷰에서 여러 스케치의 점을 잇는 3D 연결선을 담는, 평면 없는 스케치.
+// 프로젝트당 하나만 쓰고 없으면 만든다.
+export async function ensureFreeSketch(projectId: string) {
+  await assertOwner(projectId);
+  const existing = await prisma.sketch.findFirst({ where: { projectId, planeId: null } });
+  if (existing) return { id: existing.id, name: existing.name };
+  const created = await prisma.sketch.create({
+    data: { projectId, planeId: null, name: "3D 연결선" },
   });
-
-  return saved;
+  return { id: created.id, name: created.name };
 }

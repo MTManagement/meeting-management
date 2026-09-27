@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -16,13 +16,20 @@ import {
   createPerpendicularPlane,
   createSketch,
   deleteSketch,
+  ensureFreeSketch,
   saveSketchGeometry,
 } from "./actions";
 
 type Vec3 = { x: number; y: number; z: number };
 type Axis = "XY" | "YZ" | "XZ";
 type PointRec = { id: string; x: number; y: number; z: number; isVertex?: boolean };
-type EdgeRec = { id: string; fromId: string; toId: string; showLabel?: boolean };
+type EdgeRec = {
+  id: string;
+  fromId: string;
+  toId: string;
+  showLabel?: boolean;
+  strokeId?: string; // 한 번에 그은 선(획) 묶음 id. 같은 값끼리 한 개체로 선택·삭제
+};
 type SketchData = { id: string; name: string; points: PointRec[]; edges: EdgeRec[] };
 type PlaneData = {
   id: string;
@@ -198,6 +205,49 @@ function createEditableLabelDiv(text: string, onCommit: (mm: number) => void) {
   return div;
 }
 
+function strokeKeyOf(e: EdgeRec) {
+  return e.strokeId ?? e.id;
+}
+function countStrokes(edges: Iterable<EdgeRec>) {
+  const keys = new Set<string>();
+  for (const e of edges) keys.add(strokeKeyOf(e));
+  return keys.size;
+}
+
+// 점을 화면 크기와 무관하게 항상 같은 픽셀 크기의 동그라미로 그리기
+// 위한 원형 텍스처(구 메시는 확대하면 점이 거대해 보였다).
+let dotTexture: THREE.Texture | null = null;
+function getDotTexture() {
+  if (dotTexture) return dotTexture;
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d")!;
+  ctx.beginPath();
+  ctx.arc(32, 32, 28, 0, Math.PI * 2);
+  ctx.fillStyle = "#ffffff";
+  ctx.fill();
+  dotTexture = new THREE.CanvasTexture(c);
+  return dotTexture;
+}
+const DOT_PX = 9;
+const DOT_SELECTED_PX = 14;
+function makeDot(pos: THREE.Vector3, color: number, sizePx = DOT_PX) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0], 3));
+  const mat = new THREE.PointsMaterial({
+    color,
+    size: sizePx,
+    sizeAttenuation: false,
+    map: getDotTexture(),
+    transparent: true,
+    alphaTest: 0.5,
+    depthTest: false,
+  });
+  const dot = new THREE.Points(geo, mat);
+  dot.position.copy(pos); // 위치는 오브젝트 position으로(점 드래그 시 이것만 바꾸면 됨)
+  return dot;
+}
+
 const TAP_MAX_MOVE = 8; // px
 const TAP_MAX_MS = 500;
 
@@ -212,14 +262,36 @@ function nowMs() {
   return Date.now();
 }
 
+// CATIA 트리처럼 부모에서 자식으로 이어지는 가지선(├, └)을 그린다.
+// guides: 조상 단계마다 세로선을 계속 이어 그릴지(그 조상이 마지막 자식이 아니면 true)
+function TreeGuides({ guides, isLast }: { guides: boolean[]; isLast: boolean }) {
+  return (
+    <>
+      {guides.map((g, i) => (
+        <span key={i} className="relative w-4 shrink-0">
+          {g && <span className="absolute left-1/2 top-0 bottom-0 border-l border-gray-300" />}
+        </span>
+      ))}
+      <span className="relative w-4 shrink-0">
+        <span
+          className={`absolute left-1/2 top-0 border-l border-gray-300 ${isLast ? "h-1/2" : "bottom-0"}`}
+        />
+        <span className="absolute left-1/2 right-0 top-1/2 border-t border-gray-300" />
+      </span>
+    </>
+  );
+}
+
 export default function ProjectCanvas({
   projectId,
   projectName,
-  planes,
+  planes: serverPlanes,
+  freeSketch: serverFreeSketch,
 }: {
   projectId: string;
   projectName: string;
   planes: PlaneData[];
+  freeSketch: SketchData | null;
 }) {
   const router = useRouter();
   const mountRef = useRef<HTMLDivElement>(null);
@@ -240,7 +312,7 @@ export default function ProjectCanvas({
   // 굵은 선(Line2)은 화면 픽셀 해상도를 알아야 제대로 된 두께로 그려진다.
   const lineResolutionRef = useRef(new THREE.Vector2(1, 1));
 
-  const activePointMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
+  const activePointMeshesRef = useRef<Map<string, THREE.Points>>(new Map());
   const activeEdgeLinesRef = useRef<Map<string, Line2>>(new Map());
   const activeEdgeLabelsRef = useRef<Map<string, CSS2DObject>>(new Map());
   const activePointsRef = useRef<Map<string, PointRec>>(new Map());
@@ -251,6 +323,7 @@ export default function ProjectCanvas({
   const UNDO_STACK_LIMIT = 50;
   const activeEdgesRef = useRef<Map<string, EdgeRec>>(new Map());
   const lastPointIdRef = useRef<string | null>(null);
+  const currentStrokeIdRef = useRef<string | null>(null);
   const dirtyRef = useRef(false);
 
   const previewLineRef = useRef<THREE.Line | null>(null);
@@ -292,10 +365,8 @@ export default function ProjectCanvas({
 
   const [offsetInput, setOffsetInput] = useState("0");
   const [offsetAxis, setOffsetAxis] = useState<Axis>("XY");
-  const [saving, setSaving] = useState(false);
-  const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [pointCount, setPointCount] = useState(0);
-  const [edgeCount, setEdgeCount] = useState(0);
+  const [strokeCount, setStrokeCount] = useState(0);
   const [cursorMm, setCursorMm] = useState<{ x: number; y: number; z: number } | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -317,8 +388,79 @@ export default function ProjectCanvas({
   // 그리는 중 키보드로 입력한 치수(숫자). 상태바 표시용이고 실제 값은 ref에 있다.
   const [typedLength, setTypedLength] = useState("");
 
+  // 오버뷰 "선 잇기": 서로 다른 스케치의 점(끝점 등)을 골라 3D 선으로 잇는다.
+  const [connectMode, setConnectMode] = useState(false);
+  const [connectFrom, setConnectFrom] = useState<PointRec | null>(null);
+  const connectMarkerRef = useRef<THREE.Points | null>(null);
+  const connectPreviewRef = useRef<THREE.Line | null>(null);
+
   // 트리에서 접어둔 평면 id들 (CATIA 스타일 펼치기/접기)
   const [collapsedPlaneIds, setCollapsedPlaneIds] = useState<Set<string>>(new Set());
+
+  // ── 스케치 나가기 = 즉시 나가고, 저장은 뒤에서(백그라운드) ──────────
+  // 나갈 때마다 저장이 끝날 때까지 기다리면 느려서, 방금 편집한 점/선은
+  // 화면용 사본(override)으로 바로 반영하고 실제 DB 저장은 대기열에서
+  // 순서대로 처리한다. 서버 데이터보다 override가 항상 우선이다.
+  const [sketchOverrides, setSketchOverrides] = useState<
+    Map<string, { points: PointRec[]; edges: EdgeRec[] }>
+  >(new Map());
+  const [pendingSaves, setPendingSaves] = useState(0);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const [freeSketchId, setFreeSketchId] = useState<string | null>(serverFreeSketch?.id ?? null);
+
+  const planes = useMemo(
+    () =>
+      serverPlanes.map((plane) => ({
+        ...plane,
+        sketches: plane.sketches.map((sk) => {
+          const o = sketchOverrides.get(sk.id);
+          return o ? { ...sk, points: o.points, edges: o.edges } : sk;
+        }),
+      })),
+    [serverPlanes, sketchOverrides]
+  );
+  const freeSketch = useMemo<SketchData | null>(() => {
+    const id = freeSketchId;
+    if (!id) return null;
+    const base = serverFreeSketch && serverFreeSketch.id === id ? serverFreeSketch : null;
+    const o = sketchOverrides.get(id);
+    return {
+      id,
+      name: base?.name ?? "3D 연결선",
+      points: o?.points ?? base?.points ?? [],
+      edges: o?.edges ?? base?.edges ?? [],
+    };
+  }, [freeSketchId, serverFreeSketch, sketchOverrides]);
+
+  function setSketchOverride(sketchId: string, points: PointRec[], edges: EdgeRec[]) {
+    setSketchOverrides((prev) => new Map(prev).set(sketchId, { points, edges }));
+  }
+
+  function queueSave(sketchId: string, points: PointRec[], edges: EdgeRec[]) {
+    setPendingSaves((n) => n + 1);
+    const pointsIn = points.map((p) => ({ id: p.id, x: p.x, y: p.y, z: p.z, isVertex: p.isVertex }));
+    const edgesIn = edges.map((e) => ({ fromId: e.fromId, toId: e.toId, strokeId: e.strokeId }));
+    saveQueueRef.current = saveQueueRef.current.then(async () => {
+      try {
+        await saveSketchGeometry(projectId, sketchId, pointsIn, edgesIn);
+      } catch (err) {
+        console.error(err);
+        alert("스케치 저장에 실패했습니다. 네트워크 상태를 확인해주세요.");
+      } finally {
+        setPendingSaves((n) => n - 1);
+      }
+    });
+  }
+
+  // 저장이 아직 끝나지 않았는데 페이지를 닫으려 하면 경고한다.
+  useEffect(() => {
+    if (pendingSaves <= 0) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [pendingSaves]);
 
   const activePlane = planes.find((p) => p.id === activePlaneId) ?? null;
 
@@ -395,7 +537,7 @@ export default function ProjectCanvas({
 
     // ── 월드 원점(0,0,0) 방향 축 — 화면 고정 위젯이 아니라 실제 3D
     // 공간의 원점에 놓여서, 카메라를 돌리면 다른 지오메트리처럼 같이 돈다.
-    const AXIS_LEN = 0.6;
+    const AXIS_LEN = mmToScene(500);
     const axisDefs: { dir: THREE.Vector3; color: number; label: string }[] = [
       { dir: new THREE.Vector3(1, 0, 0), color: 0xd9534f, label: "X" },
       { dir: new THREE.Vector3(0, 1, 0), color: 0x4caf50, label: "Y" },
@@ -544,49 +686,49 @@ export default function ProjectCanvas({
         cardGroup.add(mesh);
       }
 
-      for (const sketch of plane.sketches) {
-        if (mode === "sketch" && sketch.id === activeSketchId) continue; // 활성 스케치는 별도 그룹에서 그림
-        const pointById = new Map(sketch.points.map((p) => [p.id, p]));
-        const highlightedPointIds = new Set<string>();
+      for (const sketch of plane.sketches) renderRefSketch(sketch);
+    }
+    if (freeSketch) renderRefSketch(freeSketch);
 
-        for (const e of sketch.edges) {
-          const from = pointById.get(e.fromId);
-          const to = pointById.get(e.toId);
-          if (!from || !to) continue;
-          const isSelectedEdge = selectedEdge?.edgeId === e.id;
-          if (isSelectedEdge) {
-            highlightedPointIds.add(from.id);
-            highlightedPointIds.add(to.id);
-          }
-          const line = makeFatLine(
-            [vecMm(from), vecMm(to)],
-            isSelectedEdge ? SELECT_COLOR : REF_EDGE,
-            isSelectedEdge ? EDGE_WIDTH_SELECTED_PX : EDGE_WIDTH_PX
-          );
-          line.userData = {
-            kind: "edge",
-            edgeId: e.id,
-            sketchId: sketch.id,
-            from,
-            to,
-          };
-          refGroup.add(line);
-        }
+    function renderRefSketch(sketch: SketchData) {
+      if (!refGroup) return;
+      if (mode === "sketch" && sketch.id === activeSketchId) return; // 활성 스케치는 별도 그룹에서 그림
+      const pointById = new Map(sketch.points.map((p) => [p.id, p]));
+      // 오버뷰에서 선을 하나 탭하면 그 선이 속한 획 전체를 강조한다.
+      let selKey: string | null = null;
+      if (selectedEdge?.sketchId === sketch.id) {
+        const se = sketch.edges.find((e) => e.id === selectedEdge.edgeId);
+        if (se) selKey = strokeKeyOf(se);
+      }
+      const highlightedPointIds = new Set<string>();
 
-        for (const p of sketch.points) {
-          if (p.isVertex === false) continue; // 자유곡선 중간 보간점은 점으로 안 보여준다
-          const isHighlighted = highlightedPointIds.has(p.id);
-          const geo = new THREE.SphereGeometry(isHighlighted ? 0.05 : 0.028, 12, 12);
-          const mat = new THREE.MeshBasicMaterial({
-            color: isHighlighted ? SELECT_COLOR : REF_EDGE,
-          });
-          const mesh = new THREE.Mesh(geo, mat);
-          mesh.position.copy(vecMm(p));
-          refGroup.add(mesh);
+      for (const e of sketch.edges) {
+        const from = pointById.get(e.fromId);
+        const to = pointById.get(e.toId);
+        if (!from || !to) continue;
+        const isSelectedEdge = selKey !== null && strokeKeyOf(e) === selKey;
+        if (isSelectedEdge) {
+          highlightedPointIds.add(from.id);
+          highlightedPointIds.add(to.id);
         }
+        const line = makeFatLine(
+          [vecMm(from), vecMm(to)],
+          isSelectedEdge ? SELECT_COLOR : REF_EDGE,
+          isSelectedEdge ? EDGE_WIDTH_SELECTED_PX : EDGE_WIDTH_PX
+        );
+        line.userData = { kind: "edge", edgeId: e.id, sketchId: sketch.id, from, to };
+        refGroup.add(line);
+      }
+
+      for (const p of sketch.points) {
+        if (p.isVertex === false) continue; // 자유곡선/드래그 선의 점은 점으로 안 보여준다
+        const isHighlighted = highlightedPointIds.has(p.id);
+        refGroup.add(
+          makeDot(vecMm(p), isHighlighted ? SELECT_COLOR : REF_EDGE, isHighlighted ? DOT_SELECTED_PX : 7)
+        );
       }
     }
-  }, [planes, activePlaneId, activeSketchId, mode, selectedPlaneId, selectedEdge]);
+  }, [planes, freeSketch, activePlaneId, activeSketchId, mode, selectedPlaneId, selectedEdge]);
 
   // 손그림 느낌을 살리려고 선을 두껍게(화면 픽셀 기준) 그린다. 일반
   // THREE.Line의 linewidth는 대부분 브라우저(크롬 등)에서 무시되기
@@ -607,10 +749,7 @@ export default function ProjectCanvas({
 
   // ── 활성 스케치용 점/선 메시 헬퍼 ──────────────────────────────
   function addActivePointMesh(id: string, p: PointRec) {
-    const geo = new THREE.SphereGeometry(0.032, 12, 12);
-    const mat = new THREE.MeshBasicMaterial({ color: PENCIL });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(mmToScene(p.x), mmToScene(p.y), mmToScene(p.z));
+    const mesh = makeDot(vecMm(p), PENCIL);
     activePointGroupRef.current?.add(mesh);
     activePointMeshesRef.current.set(id, mesh);
   }
@@ -705,6 +844,15 @@ export default function ProjectCanvas({
     lastPointIdRef.current = null;
   }
 
+  // 상태바 표시용 개수. 선은 획(한 번에 그은 선) 단위, 점은 화면에
+  // 보이는 꼭짓점만 센다(자유곡선 내부 보간점 제외).
+  function syncCounts() {
+    let vertices = 0;
+    for (const p of activePointsRef.current.values()) if (p.isVertex !== false) vertices++;
+    setPointCount(vertices);
+    setStrokeCount(countStrokes(activeEdgesRef.current.values()));
+  }
+
   // 지금 그려진 점/선 상태를 실행 취소 스택에 저장해둔다. 실제로 뭔가를
   // 바꾸는 동작(선 긋기, 점 드래그, 삭제 등) 직전에 호출한다.
   function pushUndoSnapshot() {
@@ -727,8 +875,7 @@ export default function ProjectCanvas({
       activeEdgesRef.current.set(e.id, e);
       addActiveEdgeLine(e, e.showLabel ?? true);
     }
-    setPointCount(activePointsRef.current.size);
-    setEdgeCount(activeEdgesRef.current.size);
+    syncCounts();
     dirtyRef.current = true;
     selectActivePoint(null);
   }
@@ -793,6 +940,7 @@ export default function ProjectCanvas({
   // 기존 스케치를 열 때는 "수정" 상태로 시작하고(실수로 선이 이어지지
   // 않게), 방금 만든 빈 스케치는 바로 그릴 수 있게 "그리기" 상태로 연다.
   function enterSketch(plane: PlaneData, sketch: SketchData, startTool: "pen" | "move" = "move") {
+    stopConnect();
     clearActiveGeometry();
     undoStackRef.current = [];
     for (const p of sketch.points) activePointsRef.current.set(p.id, p);
@@ -801,8 +949,7 @@ export default function ProjectCanvas({
       if (p.isVertex !== false) addActivePointMesh(id, p);
     }
     for (const [, e] of activeEdgesRef.current) addActiveEdgeLine(e, e.showLabel ?? true);
-    setPointCount(activePointsRef.current.size);
-    setEdgeCount(activeEdgesRef.current.size);
+    syncCounts();
     dirtyRef.current = false;
 
     setActivePlaneId(plane.id);
@@ -817,12 +964,15 @@ export default function ProjectCanvas({
     snapCameraFlat(plane);
   }
 
-  // "나가기"를 누르면 별도 저장 버튼 없이 현재 스케치 상태를 그대로
-  // 저장하면서 나간다. (저장 버튼은 없앴고, 파일 단위 저장은 추후 상단
-  // 메뉴에서 따로 만들 예정)
-  async function exitSketch() {
-    if (dirtyRef.current) {
-      await saveCurrentSketch();
+  // "나가기"는 저장을 기다리지 않고 바로 나간다. 편집한 내용은 화면용
+  // 사본으로 즉시 반영하고, 실제 DB 저장은 뒤에서 대기열로 처리한다.
+  function exitSketch() {
+    if (activeSketchId && dirtyRef.current) {
+      const points = [...activePointsRef.current.values()].map((p) => ({ ...p }));
+      const edges = [...activeEdgesRef.current.values()].map((e) => ({ ...e }));
+      setSketchOverride(activeSketchId, points, edges);
+      queueSave(activeSketchId, points, edges);
+      dirtyRef.current = false;
     }
     clearActiveGeometry();
     undoStackRef.current = [];
@@ -833,7 +983,6 @@ export default function ProjectCanvas({
     setActivePlaneId(null);
     setActiveSketchId(null);
     setMode("overview");
-    router.refresh();
   }
 
   function togglePlaneCollapsed(planeId: string) {
@@ -866,6 +1015,7 @@ export default function ProjectCanvas({
     if (!confirm(`"${sketch.name}" 스케치를 삭제할까요? 되돌릴 수 없습니다.`)) return;
     setBusy(true);
     try {
+      await saveQueueRef.current; // 이 스케치 저장이 대기 중이면 끝난 뒤 삭제
       await deleteSketch(projectId, sketch.id);
       if (sketch.id === activeSketchId) {
         clearActiveGeometry();
@@ -912,6 +1062,172 @@ export default function ProjectCanvas({
     }
   }
 
+  // ── 오버뷰: 선 잇기 / 선 지우기 ────────────────────────────────
+  function getSketchData(sketchId: string): SketchData | null {
+    if (freeSketch && freeSketch.id === sketchId) return freeSketch;
+    for (const pl of planes) {
+      const sk = pl.sketches.find((x) => x.id === sketchId);
+      if (sk) return sk;
+    }
+    return null;
+  }
+
+  // 화면 좌표 기준으로 가장 가까운 점(모든 스케치 + 3D 연결선)을 찾는다.
+  // 점 표시가 안 되는 선의 끝점/곡선 위 점도 모두 후보다.
+  function pickScreenPoint(clientX: number, clientY: number, maxPx = 24): PointRec | null {
+    const mount = mountRef.current;
+    const camera = cameraRef.current;
+    if (!mount || !camera) return null;
+    const rect = mount.getBoundingClientRect();
+    const all: PointRec[] = [
+      ...planes.flatMap((pl) => pl.sketches.flatMap((sk) => sk.points)),
+      ...(freeSketch?.points ?? []),
+    ];
+    let best: PointRec | null = null;
+    let bestD = maxPx;
+    const v = new THREE.Vector3();
+    for (const p of all) {
+      v.copy(vecMm(p)).project(camera);
+      if (v.z > 1) continue; // 카메라 뒤
+      const sx = rect.left + ((v.x + 1) / 2) * rect.width;
+      const sy = rect.top + ((1 - v.y) / 2) * rect.height;
+      const d = Math.hypot(sx - clientX, sy - clientY);
+      if (d < bestD) {
+        bestD = d;
+        best = p;
+      }
+    }
+    return best;
+  }
+
+  function clearConnectPreview() {
+    const line = connectPreviewRef.current;
+    if (!line) return;
+    previewGroupRef.current?.remove(line);
+    line.geometry.dispose();
+    (line.material as THREE.Material).dispose();
+    connectPreviewRef.current = null;
+  }
+
+  function updateConnectPreview(clientX: number, clientY: number) {
+    const from = connectFrom;
+    const mount = mountRef.current;
+    const camera = cameraRef.current;
+    if (!from || !mount || !camera) return;
+    const fromVec = vecMm(from);
+    const snap = pickScreenPoint(clientX, clientY);
+    let target: THREE.Vector3 | null = snap ? vecMm(snap) : null;
+    if (!target) {
+      // 스냅할 점이 없으면 시작점을 지나고 화면을 향한 평면 위로 투영
+      const rect = mount.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1
+      );
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(mouse, camera);
+      const normal = new THREE.Vector3();
+      camera.getWorldDirection(normal);
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, fromVec);
+      target = raycaster.ray.intersectPlane(plane, new THREE.Vector3());
+    }
+    if (!target) return;
+    if (!connectPreviewRef.current) {
+      const geo = new THREE.BufferGeometry().setFromPoints([fromVec, target]);
+      const mat = new THREE.LineDashedMaterial({ color: SELECT_COLOR, dashSize: 0.04, gapSize: 0.03 });
+      const line = new THREE.Line(geo, mat);
+      previewGroupRef.current?.add(line);
+      connectPreviewRef.current = line;
+    } else {
+      connectPreviewRef.current.geometry.setFromPoints([fromVec, target]);
+    }
+    connectPreviewRef.current.computeLineDistances();
+  }
+
+  // 선 잇기 시작점 표시(주황 점)
+  useEffect(() => {
+    const group = previewGroupRef.current;
+    if (connectMarkerRef.current) {
+      group?.remove(connectMarkerRef.current);
+      connectMarkerRef.current.geometry.dispose();
+      (connectMarkerRef.current.material as THREE.Material).dispose();
+      connectMarkerRef.current = null;
+    }
+    if (!connectFrom || mode !== "overview" || !connectMode || !group) return;
+    const marker = makeDot(vecMm(connectFrom), SELECT_COLOR, DOT_SELECTED_PX);
+    group.add(marker);
+    connectMarkerRef.current = marker;
+  }, [connectFrom, connectMode, mode]);
+
+  function stopConnect() {
+    setConnectMode(false);
+    setConnectFrom(null);
+    clearConnectPreview();
+  }
+
+  async function handleConnectTap(clientX: number, clientY: number) {
+    const hit = pickScreenPoint(clientX, clientY);
+    if (!hit) {
+      // 빈 곳을 탭하면 지금 잇던 선을 끊는다
+      setConnectFrom(null);
+      clearConnectPreview();
+      return;
+    }
+    const from = connectFrom;
+    if (!from) {
+      setConnectFrom(hit);
+      return;
+    }
+    if (Math.hypot(hit.x - from.x, hit.y - from.y, hit.z - from.z) < 1) return;
+
+    let sketchId = freeSketchId;
+    if (!sketchId) {
+      setBusy(true);
+      try {
+        const created = await ensureFreeSketch(projectId);
+        sketchId = created.id;
+        setFreeSketchId(created.id);
+      } finally {
+        setBusy(false);
+      }
+    }
+    const base = freeSketch && freeSketch.id === sketchId ? freeSketch : null;
+    const points = [...(base?.points ?? [])];
+    const edges = [...(base?.edges ?? [])];
+    const findOrAdd = (p: PointRec) => {
+      const same = points.find((q) => q.x === p.x && q.y === p.y && q.z === p.z);
+      if (same) return same.id;
+      const id = `tmp_${crypto.randomUUID()}`;
+      points.push({ id, x: p.x, y: p.y, z: p.z, isVertex: true });
+      return id;
+    };
+    const fromId = findOrAdd(from);
+    const toId = findOrAdd(hit);
+    edges.push({ id: `tmp_${crypto.randomUUID()}`, fromId, toId, strokeId: crypto.randomUUID() });
+    setSketchOverride(sketchId, points, edges);
+    queueSave(sketchId, points, edges);
+    setConnectFrom(hit); // 이어서 다음 점을 탭하면 계속 이어진다
+    clearConnectPreview();
+  }
+
+  // 오버뷰에서 선택한 선이 속한 획 전체를 지운다(어느 스케치든).
+  function deleteStrokeInSketch(sketchId: string, edgeId: string) {
+    const sk = getSketchData(sketchId);
+    if (!sk) return;
+    const target = sk.edges.find((e) => e.id === edgeId);
+    if (!target) return;
+    const key = strokeKeyOf(target);
+    const edges = sk.edges.filter((e) => strokeKeyOf(e) !== key);
+    const used = new Set(edges.flatMap((e) => [e.fromId, e.toId]));
+    const removedEnds = new Set(
+      sk.edges.filter((e) => strokeKeyOf(e) === key).flatMap((e) => [e.fromId, e.toId])
+    );
+    const points = sk.points.filter((p) => used.has(p.id) || !removedEnds.has(p.id));
+    setSketchOverride(sketchId, points, edges);
+    queueSave(sketchId, points, edges);
+    setSelectedEdge(null);
+  }
+
   // ── 오버뷰 모드: 평면 카드/선 클릭으로 선택 ────────────────────
   function handleOverviewClick(clientX: number, clientY: number) {
     const mount = mountRef.current;
@@ -925,13 +1241,15 @@ export default function ProjectCanvas({
     );
     const raycaster = new THREE.Raycaster();
     raycaster.params.Line = { threshold: 0.08 };
+    // 굵은 선(Line2)은 기본 판정 폭이 선 두께(2.5px)뿐이라 손가락으로는
+    // 거의 못 짚는다. 앞뒤로 넉넉히 여유를 준다(px).
+    (raycaster.params as Record<string, unknown>).Line2 = { threshold: 18 };
     raycaster.setFromCamera(mouse, camera);
 
     const targets = [
       ...(planeCardGroupRef.current?.children ?? []),
       ...(refGeometryGroupRef.current?.children ?? []),
-      ...(activeEdgeGroupRef.current?.children ?? []),
-    ];
+    ].filter((o) => !(o instanceof THREE.Points));
     const hits = raycaster.intersectObjects(targets, false);
     if (hits.length === 0) {
       setSelectedPlaneId(null);
@@ -982,11 +1300,13 @@ export default function ProjectCanvas({
 
   function findNearbyActivePoint(
     pos: THREE.Vector3,
-    threshold = NEARBY_POINT_THRESHOLD
+    threshold = NEARBY_POINT_THRESHOLD,
+    vertexOnly = false
   ): string | null {
     let best: string | null = null;
     let bestDist = threshold;
     for (const [id, p] of activePointsRef.current) {
+      if (vertexOnly && p.isVertex === false) continue;
       const d = pos.distanceTo(vecMm(p));
       if (d < bestDist) {
         bestDist = d;
@@ -1008,6 +1328,8 @@ export default function ProjectCanvas({
     showPoint = true,
     nearbyThreshold = NEARBY_POINT_THRESHOLD
   ) {
+    // 이어지는 선이 없는 상태(새 선의 시작)면 새 획 id를 만든다.
+    if (!lastPointIdRef.current) currentStrokeIdRef.current = crypto.randomUUID();
     let pointId = findNearbyActivePoint(target, nearbyThreshold);
     if (!pointId) {
       pointId = `tmp_${crypto.randomUUID()}`;
@@ -1020,17 +1342,23 @@ export default function ProjectCanvas({
       };
       activePointsRef.current.set(pointId, rec);
       if (showPoint) addActivePointMesh(pointId, rec);
-      setPointCount(activePointsRef.current.size);
+      syncCounts();
       dirtyRef.current = true;
     }
 
     const last = lastPointIdRef.current;
     if (last && last !== pointId) {
       const edgeId = `tmp_${crypto.randomUUID()}`;
-      const rec: EdgeRec = { id: edgeId, fromId: last, toId: pointId, showLabel };
+      const rec: EdgeRec = {
+        id: edgeId,
+        fromId: last,
+        toId: pointId,
+        showLabel,
+        strokeId: currentStrokeIdRef.current ?? undefined,
+      };
       activeEdgesRef.current.set(edgeId, rec);
       addActiveEdgeLine(rec, showLabel);
-      setEdgeCount(activeEdgesRef.current.size);
+      syncCounts();
       dirtyRef.current = true;
     }
     lastPointIdRef.current = pointId;
@@ -1311,11 +1639,16 @@ export default function ProjectCanvas({
   function highlightActiveSelection(pointId: string | null, edgeId: string | null) {
     for (const [id, mesh] of activePointMeshesRef.current) {
       const isSel = id === pointId;
-      (mesh.material as THREE.MeshBasicMaterial).color.set(isSel ? SELECT_COLOR : PENCIL);
-      mesh.scale.setScalar(isSel ? 1.6 : 1);
+      const mat = mesh.material as THREE.PointsMaterial;
+      mat.color.set(isSel ? SELECT_COLOR : PENCIL);
+      mat.size = isSel ? DOT_SELECTED_PX : DOT_PX;
     }
+    // 선을 하나 탭해도 그 선이 속한 획 전체를 함께 강조한다.
+    const selEdge = edgeId ? activeEdgesRef.current.get(edgeId) : undefined;
+    const selKey = selEdge ? strokeKeyOf(selEdge) : null;
     for (const [id, line] of activeEdgeLinesRef.current) {
-      const isSel = id === edgeId;
+      const e = activeEdgesRef.current.get(id);
+      const isSel = selKey !== null && !!e && strokeKeyOf(e) === selKey;
       line.material.color.set(isSel ? SELECT_COLOR : PENCIL);
       line.material.linewidth = isSel ? EDGE_WIDTH_SELECTED_PX : EDGE_WIDTH_PX;
     }
@@ -1330,31 +1663,52 @@ export default function ProjectCanvas({
     setSelectedPointId(null);
     highlightActiveSelection(null, id);
   }
-  function handleDeleteSelectedPoint() {
-    if (!selectedPointId) return;
+  // 선택한 개체 지우기. 점이 선택돼 있으면 그 점과 연결된 선을, 선이
+  // 선택돼 있으면 그 선이 속한 획(한 번에 그은 선) 전체를 지운다.
+  // 지운 선 때문에 아무 데도 연결되지 않게 된 점도 같이 정리한다.
+  function handleDeleteSelection() {
+    if (!selectedPointId && !selectedActiveEdgeId) return;
     pushUndoSnapshot();
-    const id = selectedPointId;
-    for (const [eid, e] of [...activeEdgesRef.current]) {
-      if (e.fromId !== id && e.toId !== id) continue;
-      removeActiveEdgeLine(eid);
-      activeEdgesRef.current.delete(eid);
+    const touchedPointIds = new Set<string>();
+    if (selectedPointId) {
+      const id = selectedPointId;
+      for (const [eid, e] of [...activeEdgesRef.current]) {
+        if (e.fromId !== id && e.toId !== id) continue;
+        touchedPointIds.add(e.fromId);
+        touchedPointIds.add(e.toId);
+        removeActiveEdgeLine(eid);
+        activeEdgesRef.current.delete(eid);
+      }
+      removeActivePointMesh(id);
+      activePointsRef.current.delete(id);
+      touchedPointIds.delete(id);
+    } else if (selectedActiveEdgeId) {
+      const target = activeEdgesRef.current.get(selectedActiveEdgeId);
+      if (target) {
+        const key = strokeKeyOf(target);
+        for (const [eid, e] of [...activeEdgesRef.current]) {
+          if (strokeKeyOf(e) !== key) continue;
+          touchedPointIds.add(e.fromId);
+          touchedPointIds.add(e.toId);
+          removeActiveEdgeLine(eid);
+          activeEdgesRef.current.delete(eid);
+        }
+      }
     }
-    removeActivePointMesh(id);
-    activePointsRef.current.delete(id);
-    if (lastPointIdRef.current === id) lastPointIdRef.current = null;
-    setPointCount(activePointsRef.current.size);
-    setEdgeCount(activeEdgesRef.current.size);
+    for (const pid of touchedPointIds) {
+      const stillUsed = [...activeEdgesRef.current.values()].some(
+        (e) => e.fromId === pid || e.toId === pid
+      );
+      if (stillUsed) continue;
+      removeActivePointMesh(pid);
+      activePointsRef.current.delete(pid);
+    }
+    if (lastPointIdRef.current && !activePointsRef.current.has(lastPointIdRef.current)) {
+      lastPointIdRef.current = null;
+    }
+    syncCounts();
     dirtyRef.current = true;
     selectActivePoint(null);
-  }
-  function handleDeleteSelectedEdge() {
-    if (!selectedActiveEdgeId) return;
-    pushUndoSnapshot();
-    removeActiveEdgeLine(selectedActiveEdgeId);
-    activeEdgesRef.current.delete(selectedActiveEdgeId);
-    setEdgeCount(activeEdgesRef.current.size);
-    dirtyRef.current = true;
-    selectActiveEdge(null);
   }
 
   // OrbitControls는 터치 시작 시 제스처 종류와 무관하게 항상
@@ -1427,6 +1781,9 @@ export default function ProjectCanvas({
   }
 
   function handlePointerDown(e: React.PointerEvent) {
+    // 마우스 가운데(회전)/오른쪽(이동) 버튼은 화면 조작 전용 — 점·선을
+    // 잡거나 선택하면 안 된다. 왼쪽 버튼(0)만 그리기/선택에 쓴다.
+    if (e.pointerType === "mouse" && e.button !== 0) return;
     pointerPositionsRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     activePointerIdsRef.current.add(e.pointerId);
     if (activePointerIdsRef.current.size !== 3) panCentroidRef.current = null;
@@ -1441,7 +1798,9 @@ export default function ProjectCanvas({
     if (mode === "sketch" && tool === "move") {
       const target = raycastToActivePlane(e.clientX, e.clientY);
       if (target) {
-        const pointId = findNearbyActivePoint(target);
+        // 화면에 보이는 꼭짓점만 잡는다. 자유곡선 내부 보간점을 잡으면
+        // 곡선에서 뾰족하게 한 점만 튀어나오는 문제가 생긴다.
+        const pointId = findNearbyActivePoint(target, NEARBY_POINT_THRESHOLD, true);
         if (pointId) {
           pushUndoSnapshot();
           draggingPointIdRef.current = pointId;
@@ -1474,6 +1833,9 @@ export default function ProjectCanvas({
     );
     const raycaster = new THREE.Raycaster();
     raycaster.params.Line = { threshold: 0.08 };
+    // 굵은 선(Line2)은 기본 판정 폭이 선 두께(2.5px)뿐이라 손가락으로는
+    // 거의 못 짚는다. 앞뒤로 넉넉히 여유를 준다(px).
+    (raycaster.params as Record<string, unknown>).Line2 = { threshold: 18 };
     raycaster.setFromCamera(mouse, camera);
     const hits = raycaster.intersectObjects(activeEdgeGroupRef.current?.children ?? [], false);
     if (hits.length === 0) {
@@ -1487,6 +1849,7 @@ export default function ProjectCanvas({
   }
 
   function handlePointerUp(e: React.PointerEvent) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
     activePointerIdsRef.current.delete(e.pointerId);
     pointerPositionsRef.current.delete(e.pointerId);
     if (activePointerIdsRef.current.size !== 3) panCentroidRef.current = null;
@@ -1524,8 +1887,8 @@ export default function ProjectCanvas({
 
       const wasTap = down && isTap(down, { x: e.clientX, y: e.clientY });
       if (wasTap) {
-        // 거의 안 움직였으면 기존처럼 탭 한 번 = 점 하나
-        handleDrawClick(e.clientX, e.clientY);
+        // 이어그리기가 꺼져 있으면 탭 한 번으로는 아무것도 그리지 않는다
+        // (선으로 이어지지도 않는 외톨이 점만 남는 걸 막기 위해).
       } else if (wasStraight) {
         // 직선 모드(체크박스 또는 1초 멈춤으로 전환) → 시작점~끝점 직선.
         // 드래그로 그은 선이라 점은 안 보여주고 치수만 보여준다.
@@ -1546,6 +1909,10 @@ export default function ProjectCanvas({
     if (mode === "sketch") {
       if (tool === "pen" && chainMode) handleDrawClick(e.clientX, e.clientY);
       else if (tool === "move") handleActiveEdgeTap(e.clientX, e.clientY);
+      return;
+    }
+    if (connectMode) {
+      handleConnectTap(e.clientX, e.clientY);
       return;
     }
     handleOverviewClick(e.clientX, e.clientY);
@@ -1572,6 +1939,10 @@ export default function ProjectCanvas({
       return;
     }
 
+    if (mode === "overview" && connectMode && connectFrom && activePointerIdsRef.current.size <= 1) {
+      updateConnectPreview(e.clientX, e.clientY);
+      return;
+    }
     if (mode !== "sketch") return;
     if (activePointerIdsRef.current.size > 1) return; // 두 손가락 제스처 중엔 관여하지 않는다
 
@@ -1632,12 +2003,17 @@ export default function ProjectCanvas({
         selectActivePoint(null);
         return;
       }
+      if (e.key === "Delete" || (e.key === "Backspace" && tool === "move")) {
+        e.preventDefault();
+        handleDeleteSelection();
+        return;
+      }
       handleDrawKeyDown(e);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, tool]);
+  }, [mode, tool, selectedPointId, selectedActiveEdgeId]);
 
   function handleClearAll() {
     if (!confirm("현재 스케치의 모든 점과 선을 지울까요? (실행 취소로 되돌릴 수 있습니다)")) return;
@@ -1646,123 +2022,141 @@ export default function ProjectCanvas({
     hideDrawPreview();
     setSelectedPointId(null);
     setSelectedActiveEdgeId(null);
-    setPointCount(0);
-    setEdgeCount(0);
+    syncCounts();
     dirtyRef.current = true;
-  }
-
-  // 별도 저장 버튼은 없고, 나가기를 누를 때 이 함수로 현재 상태를 저장한다.
-  async function saveCurrentSketch() {
-    if (!activeSketchId) return;
-    setSaving(true);
-    try {
-      const pointsArr = [...activePointsRef.current.values()];
-      const edgesArr = [...activeEdgesRef.current.values()].map((e) => ({
-        fromId: e.fromId,
-        toId: e.toId,
-      }));
-      await saveSketchGeometry(projectId, activeSketchId, pointsArr, edgesArr);
-      setSavedAt(new Date());
-      dirtyRef.current = false;
-    } finally {
-      setSaving(false);
-    }
   }
 
   const selectedPlane = planes.find((p) => p.id === selectedPlaneId) ?? null;
 
   return (
     <div className="fixed inset-0 bg-[#faf6ee] overflow-hidden">
-      {/* 좌측 트리 (캔버스 위에 떠 있는 패널, 레이아웃을 나누지 않음) */}
+      {/* 좌측 트리 (캔버스 위에 떠 있는 패널, 레이아웃을 나누지 않음) — CATIA식 연결선 트리 */}
       <div className="absolute top-[4.75rem] left-3 z-10 w-64 max-h-[calc(100vh-5.5rem)] flex flex-col rounded-lg border border-black/10 bg-white/90 backdrop-blur-sm shadow-lg">
-        <div className="px-3 py-3 border-b border-black/10">
-          <p className="text-sm font-bold text-gray-900 truncate">{projectName}</p>
-        </div>
-        <div className="flex-1 overflow-y-auto px-1.5 py-2 text-xs">
-          {planes.map((plane) => {
-            const isCollapsed = collapsedPlaneIds.has(plane.id);
-            const isPlaneActive = plane.id === (mode === "sketch" ? activePlaneId : selectedPlaneId);
-            const hasChildren = plane.sketches.length > 0;
+        <div className="flex-1 overflow-y-auto px-2 py-2 text-xs text-gray-700">
+          <div className="flex items-center gap-1.5 h-6 px-1 font-bold text-gray-900">
+            <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <path d="M2 4h5l1.5 1.5H14v7.5H2z" />
+            </svg>
+            <span className="truncate">{projectName}</span>
+          </div>
+          {(() => {
+            const rootChildCount = planes.length + (freeSketch ? 1 : 0);
             return (
-              <div key={plane.id}>
-                <div
-                  onClick={() => {
-                    setSelectedPlaneId(plane.id);
-                    setSelectedEdge(null);
-                  }}
-                  className={`group w-full flex items-center gap-1 pr-1 py-1 rounded-md cursor-pointer ${
-                    isPlaneActive ? "bg-gray-900 text-white" : "text-gray-700 hover:bg-black/5"
-                  }`}
-                >
-                  <span
-                    role="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (hasChildren) togglePlaneCollapsed(plane.id);
-                    }}
-                    className="w-4 shrink-0 text-center text-[9px] leading-none select-none"
-                  >
-                    {hasChildren ? (isCollapsed ? "▸" : "▾") : ""}
-                  </span>
-                  <svg
-                    viewBox="0 0 16 16"
-                    className={`w-3.5 h-3.5 shrink-0 ${
-                      isPlaneActive ? "text-white/80" : "text-gray-400"
-                    }`}
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.3"
-                  >
-                    <path d="M2 5.5L8 2l6 3.5-6 3.5-6-3.5Z" />
-                    <path d="M2 5.5v5L8 14l6-3.5v-5" />
-                  </svg>
-                  <span className="flex-1 truncate">{plane.label}</span>
-                  <span
-                    role="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (!busy) handleCreateSketch(plane);
-                    }}
-                    className="text-[10px] opacity-0 group-hover:opacity-70 hover:!opacity-100 px-1"
-                    title="새 스케치 만들기"
-                  >
-                    +
-                  </span>
-                </div>
-                {!isCollapsed &&
-                  plane.sketches.map((sketch) => (
-                    <div
-                      key={sketch.id}
-                      className={`group w-full flex items-center pl-5 pr-1 rounded-md ${
-                        sketch.id === activeSketchId
-                          ? "bg-gray-900/90 text-white"
-                          : "text-gray-500 hover:bg-black/5"
-                      }`}
-                    >
-                      <span className="w-4 shrink-0" />
-                      <button
-                        onClick={() => enterSketch(plane, sketch)}
-                        className="flex-1 text-left py-1 truncate"
-                      >
-                        ✎ {sketch.name}{" "}
-                        <span className="opacity-50">({sketch.points.length}점)</span>
-                      </button>
-                      <span
-                        role="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (!busy) handleDeleteSketch(sketch);
-                        }}
-                        className="text-[10px] opacity-0 group-hover:opacity-60 hover:!opacity-100 px-1"
-                        title="스케치 삭제"
-                      >
-                        🗑
-                      </span>
+              <>
+                {planes.map((plane, pi) => {
+                  const planeIsLast = pi === rootChildCount - 1;
+                  const isCollapsed = collapsedPlaneIds.has(plane.id);
+                  const isPlaneActive =
+                    plane.id === (mode === "sketch" ? activePlaneId : selectedPlaneId);
+                  const hasChildren = plane.sketches.length > 0;
+                  return (
+                    <div key={plane.id}>
+                      <div className="flex items-stretch h-6">
+                        <TreeGuides guides={[]} isLast={planeIsLast} />
+                        <div
+                          onClick={() => {
+                            setSelectedPlaneId(plane.id);
+                            setSelectedEdge(null);
+                          }}
+                          className={`group flex-1 min-w-0 flex items-center gap-1 pr-1 rounded cursor-pointer ${
+                            isPlaneActive ? "bg-amber-100 text-gray-900" : "hover:bg-black/5"
+                          }`}
+                        >
+                          <span
+                            role="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (hasChildren) togglePlaneCollapsed(plane.id);
+                            }}
+                            className="w-3 shrink-0 text-center text-[9px] text-gray-400 select-none"
+                          >
+                            {hasChildren ? (isCollapsed ? "▸" : "▾") : ""}
+                          </span>
+                          <svg
+                            viewBox="0 0 16 16"
+                            className="w-3.5 h-3.5 shrink-0 text-amber-600/80"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.3"
+                          >
+                            <path d="M2 5.5L8 2l6 3.5-6 3.5-6-3.5Z" />
+                            <path d="M2 5.5v5L8 14l6-3.5v-5" />
+                          </svg>
+                          <span className="flex-1 truncate">{plane.label}</span>
+                          <span
+                            role="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!busy) handleCreateSketch(plane);
+                            }}
+                            className="text-[11px] opacity-0 group-hover:opacity-70 hover:!opacity-100 px-1"
+                            title="새 스케치 만들기"
+                          >
+                            +
+                          </span>
+                        </div>
+                      </div>
+                      {!isCollapsed &&
+                        plane.sketches.map((sketch, si) => {
+                          const isActiveSketch = sketch.id === activeSketchId;
+                          return (
+                            <div key={sketch.id} className="flex items-stretch h-6">
+                              <TreeGuides
+                                guides={[!planeIsLast]}
+                                isLast={si === plane.sketches.length - 1}
+                              />
+                              <div
+                                className={`group flex-1 min-w-0 flex items-center gap-1 pr-1 rounded ${
+                                  isActiveSketch
+                                    ? "bg-amber-200/70 text-gray-900 font-medium"
+                                    : "text-gray-600 hover:bg-black/5"
+                                }`}
+                              >
+                                <button
+                                  onClick={() => enterSketch(plane, sketch)}
+                                  className="flex-1 min-w-0 flex items-center gap-1 text-left truncate"
+                                >
+                                  <span className="text-gray-400">✎</span>
+                                  <span className="truncate">{sketch.name}</span>
+                                  <span className="opacity-50 shrink-0">
+                                    (선 {countStrokes(sketch.edges)})
+                                  </span>
+                                </button>
+                                <span
+                                  role="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (!busy) handleDeleteSketch(sketch);
+                                  }}
+                                  className="text-[10px] opacity-0 group-hover:opacity-60 hover:!opacity-100 px-1"
+                                  title="스케치 삭제"
+                                >
+                                  🗑
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
                     </div>
-                  ))}
-              </div>
+                  );
+                })}
+                {freeSketch && (
+                  <div className="flex items-stretch h-6">
+                    <TreeGuides guides={[]} isLast />
+                    <div className="flex-1 min-w-0 flex items-center gap-1 pl-4 pr-1 text-gray-600">
+                      <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 shrink-0 text-amber-600/80" fill="none" stroke="currentColor" strokeWidth="1.3">
+                        <path d="M3 13L8 3l5 10" />
+                        <circle cx="3" cy="13" r="1.2" />
+                        <circle cx="13" cy="13" r="1.2" />
+                      </svg>
+                      <span className="truncate">{freeSketch.name}</span>
+                      <span className="opacity-50 shrink-0">(선 {countStrokes(freeSketch.edges)})</span>
+                    </div>
+                  </div>
+                )}
+              </>
             );
-          })}
+          })()}
         </div>
       </div>
 
@@ -1795,6 +2189,24 @@ export default function ProjectCanvas({
                 >
                   오프셋 평면 추가
                 </button>
+                <button
+                  onClick={() => {
+                    if (connectMode) stopConnect();
+                    else {
+                      setConnectMode(true);
+                      setSelectedEdge(null);
+                      setSelectedPlaneId(null);
+                    }
+                  }}
+                  className={`ml-2 text-xs px-2.5 py-1.5 rounded-md border ${
+                    connectMode
+                      ? "bg-gray-900 text-white border-gray-900"
+                      : "bg-white text-gray-600 border-gray-300"
+                  }`}
+                  title="서로 다른 스케치의 점(선 끝점 등)을 차례로 탭해서 3D 선으로 잇습니다"
+                >
+                  {connectMode ? "✎ 선 잇는 중 (끄기)" : "선 잇기"}
+                </button>
               </div>
 
               {selectedPlane && (
@@ -1816,17 +2228,25 @@ export default function ProjectCanvas({
                 <div className="flex items-center gap-2 text-xs bg-white border border-gray-300 rounded-md px-3 py-1.5">
                   <span className="text-gray-500">선 선택됨</span>
                   <button
-                    onClick={() => {
-                      const plane = planes.find((p) =>
-                        p.sketches.some((s) => s.id === selectedEdge.sketchId)
-                      );
-                      const sketch = plane?.sketches.find((s) => s.id === selectedEdge.sketchId);
-                      if (plane && sketch) enterSketch(plane, sketch);
-                    }}
-                    className="px-2 py-1 rounded border border-gray-300 text-gray-700"
+                    onClick={() => deleteStrokeInSketch(selectedEdge.sketchId, selectedEdge.edgeId)}
+                    className="px-2 py-1 rounded bg-red-500 text-white"
                   >
-                    스케치 열기
+                    지우기
                   </button>
+                  {selectedEdge.sketchId !== freeSketch?.id && (
+                    <button
+                      onClick={() => {
+                        const plane = planes.find((p) =>
+                          p.sketches.some((s) => s.id === selectedEdge.sketchId)
+                        );
+                        const sketch = plane?.sketches.find((s) => s.id === selectedEdge.sketchId);
+                        if (plane && sketch) enterSketch(plane, sketch);
+                      }}
+                      className="px-2 py-1 rounded border border-gray-300 text-gray-700"
+                    >
+                      스케치 열기
+                    </button>
+                  )}
                   <button
                     onClick={() =>
                       setPendingPerpEdge({ from: selectedEdge.from, to: selectedEdge.to })
@@ -1842,10 +2262,9 @@ export default function ProjectCanvas({
             <>
               <button
                 onClick={exitSketch}
-                disabled={saving}
-                className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600 disabled:opacity-50"
+                className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
               >
-                {saving ? "저장 중..." : "← 나가기"}
+                ← 나가기
               </button>
               <span className="text-xs text-gray-400 mr-2">
                 {activePlane?.label} ·{" "}
@@ -1913,45 +2332,32 @@ export default function ProjectCanvas({
               />
               <span className="text-[11px] text-gray-400 mr-1">mm</span>
 
-              {selectedPointId && (
+              {(selectedPointId || selectedActiveEdgeId) && !pendingPerpEdge && (
                 <div className="flex items-center gap-2 text-xs bg-white border border-gray-300 rounded-md px-3 py-1.5">
-                  <span className="text-gray-500">점 선택됨</span>
+                  <span className="text-gray-500">
+                    {selectedPointId ? "점 선택됨" : "선 선택됨"}
+                  </span>
                   <button
-                    onClick={handleDeleteSelectedPoint}
+                    onClick={handleDeleteSelection}
                     className="px-2 py-1 rounded bg-red-500 text-white"
                   >
-                    점 삭제
+                    지우기
                   </button>
+                  {selectedActiveEdgeId && (
+                    <button
+                      onClick={() => {
+                        const e = activeEdgesRef.current.get(selectedActiveEdgeId);
+                        const from = e && activePointsRef.current.get(e.fromId);
+                        const to = e && activePointsRef.current.get(e.toId);
+                        if (from && to) setPendingPerpEdge({ from, to });
+                      }}
+                      className="px-2 py-1 rounded border border-gray-300 text-gray-700"
+                    >
+                      이 선에 수직인 평면
+                    </button>
+                  )}
                   <button
                     onClick={() => selectActivePoint(null)}
-                    className="px-2 py-1 rounded text-gray-400"
-                  >
-                    선택 해제
-                  </button>
-                </div>
-              )}
-              {selectedActiveEdgeId && !pendingPerpEdge && (
-                <div className="flex items-center gap-2 text-xs bg-white border border-gray-300 rounded-md px-3 py-1.5">
-                  <span className="text-gray-500">선 선택됨</span>
-                  <button
-                    onClick={() => {
-                      const e = activeEdgesRef.current.get(selectedActiveEdgeId);
-                      const from = e && activePointsRef.current.get(e.fromId);
-                      const to = e && activePointsRef.current.get(e.toId);
-                      if (from && to) setPendingPerpEdge({ from, to });
-                    }}
-                    className="px-2 py-1 rounded bg-gray-900 text-white"
-                  >
-                    이 선에 수직인 평면 만들기
-                  </button>
-                  <button
-                    onClick={handleDeleteSelectedEdge}
-                    className="px-2 py-1 rounded bg-red-500 text-white"
-                  >
-                    선 삭제
-                  </button>
-                  <button
-                    onClick={() => selectActiveEdge(null)}
                     className="px-2 py-1 rounded text-gray-400"
                   >
                     선택 해제
@@ -2028,7 +2434,7 @@ export default function ProjectCanvas({
           {mode === "sketch" && (
             <>
               <span>
-                점 {pointCount}개 · 선 {edgeCount}개
+                선 {strokeCount}개 · 점 {pointCount}개
               </span>
               {cursorMm && (
                 <span>
@@ -2036,17 +2442,25 @@ export default function ProjectCanvas({
                 </span>
               )}
               {tool === "move" && (
-                <span>점을 눌러서 이동하거나 탭해서 선택, 선을 탭해서 선택하세요.</span>
+                <span>점을 끌어서 이동, 선을 탭하면 그 선(한 획) 전체가 선택됩니다. Delete 키로 지우기.</span>
               )}
               {tool === "pen" && typedLength && (
                 <span className="text-gray-600">
                   숫자 입력 중: {typedLength}mm (Enter로 확정, Esc로 취소)
                 </span>
               )}
-              {savedAt && <span>마지막 저장: {savedAt.toLocaleTimeString("ko-KR")}</span>}
             </>
           )}
-          {mode === "overview" && <span>평면이나 선을 클릭해서 선택하세요.</span>}
+          {mode === "overview" && (
+            <span>
+              {connectMode
+                ? connectFrom
+                  ? "이을 다음 점을 탭하세요 (빈 곳을 탭하면 끊기)"
+                  : "잇기 시작할 점(선 끝점 등)을 탭하세요"
+                : "평면을 탭하면 새 스케치, 선을 탭하면 선택됩니다."}
+            </span>
+          )}
+          {pendingSaves > 0 && <span className="text-amber-700">저장 중…</span>}
         </div>
 
         <div
