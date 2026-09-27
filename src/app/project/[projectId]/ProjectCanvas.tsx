@@ -975,7 +975,24 @@ export default function ProjectCanvas({
     for (const [id, p] of activePointsRef.current) {
       if (p.isVertex !== false) addActivePointMesh(id, p);
     }
-    for (const [, e] of activeEdgesRef.current) addActiveEdgeLine(e, e.showLabel ?? true);
+    // DB에는 "치수 라벨 표시 여부"가 없어서 다시 열 때 추정한다:
+    // 선분 하나짜리 획(직선) 또는 양끝이 보이는 꼭짓점인 선(이어그리기)만 라벨 표시,
+    // 자유곡선(여러 선분 + 숨은 보간점)은 라벨 없음.
+    const strokeSizes = new Map<string, number>();
+    for (const e of activeEdgesRef.current.values()) {
+      const k = strokeKeyOf(e);
+      strokeSizes.set(k, (strokeSizes.get(k) ?? 0) + 1);
+    }
+    for (const [, e] of activeEdgesRef.current) {
+      if (e.showLabel === undefined) {
+        const from = activePointsRef.current.get(e.fromId);
+        const to = activePointsRef.current.get(e.toId);
+        const single = (strokeSizes.get(strokeKeyOf(e)) ?? 1) === 1;
+        const visibleEnds = from?.isVertex !== false && to?.isVertex !== false;
+        e.showLabel = single || visibleEnds;
+      }
+      addActiveEdgeLine(e, e.showLabel);
+    }
     syncCounts();
     dirtyRef.current = false;
 
