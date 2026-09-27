@@ -12,8 +12,7 @@ import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import {
-  createOffsetPlane,
-  createPerpendicularPlane,
+  createPlaneFromDefinition,
   createSketch,
   deleteSketch,
   ensureFreeSketch,
@@ -21,7 +20,6 @@ import {
 } from "./actions";
 
 type Vec3 = { x: number; y: number; z: number };
-type Axis = "XY" | "YZ" | "XZ";
 type PointRec = { id: string; x: number; y: number; z: number; isVertex?: boolean };
 type EdgeRec = {
   id: string;
@@ -103,6 +101,26 @@ function planeQuaternion(plane: PlaneData) {
   const m = new THREE.Matrix4().makeBasis(uAxis, vAxis, normal);
   return new THREE.Quaternion().setFromRotationMatrix(m);
 }
+// 법선만 주어졌을 때 평면의 가로축(uAxis)을 정한다. Z가 위쪽이므로
+// 세워진 평면은 가로축이 수평이 되게, 바닥과 평행한 평면은 X축을 쓴다.
+function uAxisForNormal(n: Vec3): Vec3 {
+  const normal = vecUnit(n);
+  if (Math.abs(normal.z) > 0.9) return { x: 1, y: 0, z: 0 };
+  const u = new THREE.Vector3(0, 0, 1).cross(normal).normalize();
+  return { x: u.x, y: u.y, z: u.z };
+}
+function fakePlane(origin: Vec3, normal: Vec3, uAxis: Vec3): PlaneData {
+  return { id: "", label: "", origin, normal, uAxis, sketches: [] };
+}
+
+// 평면 추가 도구
+// - offset: 기준 평면을 법선 방향으로 offsetMm 만큼 띄운 평행 평면.
+//   throughPoint가 있으면 그 점을 지나는 평행 평면(Parallel through point).
+// - normal: 선택한 선(획) 위의 한 지점에서 선과 직각인 평면(Normal to curve).
+type PlaneTool =
+  | { kind: "offset"; baseId: string; offsetMm: number; throughPoint: PointRec | null }
+  | { kind: "normal"; sketchId: string; edgeId: string; pick: { point: Vec3; dir: Vec3 } | null };
+
 function toThreePlane(plane: PlaneData): THREE.Plane {
   const { origin, normal } = planeBasis(plane);
   return new THREE.Plane(normal, -normal.dot(origin));
@@ -164,7 +182,11 @@ function createLabelDiv(text: string) {
 
 // 치수 라벨을 클릭하면 숫자를 직접 입력해서 길이를 바꿀 수 있게 만든다
 // (from 점은 고정, to 점이 새 길이에 맞게 같은 방향으로 이동).
-function createEditableLabelDiv(text: string, onCommit: (mm: number) => void) {
+function createEditableLabelDiv(
+  text: string,
+  onCommit: (mm: number) => void,
+  allowNegative = false
+) {
   const div = createLabelDiv(text);
   div.style.pointerEvents = "auto";
   div.style.cursor = "pointer";
@@ -187,7 +209,7 @@ function createEditableLabelDiv(text: string, onCommit: (mm: number) => void) {
 
     const commit = () => {
       const value = parseFloat(input.value);
-      if (!Number.isNaN(value) && value > 0) onCommit(value);
+      if (!Number.isNaN(value) && (allowNegative ? true : value > 0)) onCommit(value);
     };
     input.addEventListener("keydown", (kev) => {
       if (kev.key === "Enter") input.blur();
@@ -363,8 +385,9 @@ export default function ProjectCanvas({
     null
   );
 
-  const [offsetInput, setOffsetInput] = useState("0");
-  const [offsetAxis, setOffsetAxis] = useState<Axis>("XY");
+  const [planeTool, setPlaneTool] = useState<PlaneTool | null>(null);
+  const planeToolGroupRef = useRef<THREE.Group | null>(null);
+  const arrowDragRef = useRef(false);
   const [pointCount, setPointCount] = useState(0);
   const [strokeCount, setStrokeCount] = useState(0);
   const [cursorMm, setCursorMm] = useState<{ x: number; y: number; z: number } | null>(null);
@@ -602,6 +625,9 @@ export default function ProjectCanvas({
       previewGroup
     );
     planeCardGroupRef.current = planeCardGroup;
+    const planeToolGroup = new THREE.Group();
+    scene.add(planeToolGroup);
+    planeToolGroupRef.current = planeToolGroup;
     refGeometryGroupRef.current = refGeometryGroup;
     gridGroupRef.current = gridGroup;
     activePointGroupRef.current = activePointGroup;
@@ -941,6 +967,7 @@ export default function ProjectCanvas({
   // 않게), 방금 만든 빈 스케치는 바로 그릴 수 있게 "그리기" 상태로 연다.
   function enterSketch(plane: PlaneData, sketch: SketchData, startTool: "pen" | "move" = "move") {
     stopConnect();
+    setPlaneTool(null);
     clearActiveGeometry();
     undoStackRef.current = [];
     for (const p of sketch.points) activePointsRef.current.set(p.id, p);
@@ -1029,30 +1056,21 @@ export default function ProjectCanvas({
     }
   }
 
-  // ── 평면 추가(오프셋) ──────────────────────────────────────────
-  async function handleAddOffsetPlane() {
-    const offset = parseFloat(offsetInput);
-    if (Number.isNaN(offset)) return;
-    setBusy(true);
-    try {
-      await createOffsetPlane(projectId, offsetAxis, offset);
-      router.refresh();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // ── 선택한 선의 끝점 기준 수직 평면 생성 ───────────────────────
+  // ── 스케치 안: 선택한 선의 끝점에서 그 선에 수직인 평면 ────────
   async function handleCreatePerpPlane(point: PointRec) {
     if (!pendingPerpEdge) return;
     setBusy(true);
     try {
-      const direction = {
+      const normal = {
         x: pendingPerpEdge.to.x - pendingPerpEdge.from.x,
         y: pendingPerpEdge.to.y - pendingPerpEdge.from.y,
         z: pendingPerpEdge.to.z - pendingPerpEdge.from.z,
       };
-      await createPerpendicularPlane(projectId, point, direction);
+      await createPlaneFromDefinition(projectId, {
+        origin: { x: point.x, y: point.y, z: point.z },
+        normal,
+        uAxis: uAxisForNormal(normal),
+      });
       setPendingPerpEdge(null);
       setSelectedEdge(null);
       setSelectedActiveEdgeId(null);
@@ -1061,6 +1079,281 @@ export default function ProjectCanvas({
       setBusy(false);
     }
   }
+
+  // ── 오버뷰: 평면 추가 도구 ─────────────────────────────────────
+  // 미리보기 평면(원점 mm·법선·가로축)과 표시할 오프셋 치수를 계산한다.
+  function planeToolPreview(tool: PlaneTool | null) {
+    if (!tool) return null;
+    if (tool.kind === "offset") {
+      const base = planes.find((p) => p.id === tool.baseId);
+      if (!base) return null;
+      const n = vecUnit(base.normal);
+      let origin: Vec3;
+      let offsetMm: number;
+      if (tool.throughPoint) {
+        const tp = tool.throughPoint;
+        origin = { x: tp.x, y: tp.y, z: tp.z };
+        offsetMm = Math.round(
+          (tp.x - base.origin.x) * n.x + (tp.y - base.origin.y) * n.y + (tp.z - base.origin.z) * n.z
+        );
+      } else {
+        offsetMm = tool.offsetMm;
+        origin = {
+          x: base.origin.x + n.x * offsetMm,
+          y: base.origin.y + n.y * offsetMm,
+          z: base.origin.z + n.z * offsetMm,
+        };
+      }
+      return { base, origin, normal: base.normal, uAxis: base.uAxis, offsetMm };
+    }
+    if (!tool.pick) return null;
+    return {
+      base: null,
+      origin: tool.pick.point,
+      normal: tool.pick.dir,
+      uAxis: uAxisForNormal(tool.pick.dir),
+      offsetMm: 0,
+    };
+  }
+
+  function startPlaneTool() {
+    stopConnect();
+    if (selectedPlaneId) {
+      setPlaneTool({ kind: "offset", baseId: selectedPlaneId, offsetMm: 200, throughPoint: null });
+    } else if (selectedEdge) {
+      setPlaneTool({
+        kind: "normal",
+        sketchId: selectedEdge.sketchId,
+        edgeId: selectedEdge.edgeId,
+        pick: null,
+      });
+    }
+  }
+
+  function cancelPlaneTool() {
+    setPlaneTool(null);
+    arrowDragRef.current = false;
+  }
+
+  async function applyPlaneTool() {
+    const tool = planeTool;
+    const pv = planeToolPreview(tool);
+    if (!tool || !pv) return;
+    if (tool.kind === "offset" && !tool.throughPoint && pv.offsetMm === 0) return;
+    let label: string | undefined;
+    if (tool.kind === "offset" && pv.base) {
+      label = tool.throughPoint
+        ? `${pv.base.label} 평행(점)`
+        : `${pv.base.label}${pv.offsetMm >= 0 ? "+" : ""}${pv.offsetMm}mm`;
+    }
+    setBusy(true);
+    try {
+      await createPlaneFromDefinition(projectId, {
+        label,
+        origin: pv.origin,
+        normal: pv.normal,
+        uAxis: pv.uAxis,
+      });
+      setPlaneTool(null);
+      setSelectedPlaneId(null);
+      setSelectedEdge(null);
+      router.refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 화면 좌표 → 카메라 광선
+  function screenRay(clientX: number, clientY: number): THREE.Ray | null {
+    const mount = mountRef.current;
+    const camera = cameraRef.current;
+    if (!mount || !camera) return null;
+    const rect = mount.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, camera);
+    return raycaster.ray;
+  }
+  function toScreen(v: THREE.Vector3): { x: number; y: number } | null {
+    const mount = mountRef.current;
+    const camera = cameraRef.current;
+    if (!mount || !camera) return null;
+    const rect = mount.getBoundingClientRect();
+    const p = v.clone().project(camera);
+    if (p.z > 1) return null;
+    return { x: rect.left + ((p.x + 1) / 2) * rect.width, y: rect.top + ((1 - p.y) / 2) * rect.height };
+  }
+  function distToSegment2D(
+    p: { x: number; y: number },
+    a: { x: number; y: number },
+    b: { x: number; y: number }
+  ) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2)) : 0;
+    return { dist: Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t)), t };
+  }
+
+  const PLANE_ARROW_LEN = mmToScene(250);
+  // 오프셋 화살표 근처를 눌렀는지(화면 기준 24px 이내)
+  function isNearOffsetArrow(clientX: number, clientY: number) {
+    const pv = planeToolPreview(planeTool);
+    if (!pv || planeTool?.kind !== "offset") return false;
+    const start = vecMm(pv.origin);
+    const tip = start.clone().add(vecUnit(pv.normal).multiplyScalar(PLANE_ARROW_LEN));
+    const a = toScreen(start);
+    const b = toScreen(tip);
+    if (!a || !b) return false;
+    return distToSegment2D({ x: clientX, y: clientY }, a, b).dist < 24;
+  }
+
+  // 화살표를 끄는 동안: 포인터 광선과 기준 평면의 법선 직선 사이의 가장
+  // 가까운 지점을 구해 오프셋 거리로 쓴다(10mm 단위로 맞춤).
+  function dragOffsetArrow(clientX: number, clientY: number) {
+    if (planeTool?.kind !== "offset") return;
+    const base = planes.find((p) => p.id === planeTool.baseId);
+    const ray = screenRay(clientX, clientY);
+    if (!base || !ray) return;
+    const o = vecMm(base.origin);
+    const n = vecUnit(base.normal);
+    const d = ray.direction;
+    const w0 = o.clone().sub(ray.origin);
+    const b = n.dot(d);
+    const denom = 1 - b * b;
+    if (Math.abs(denom) < 1e-4) return; // 법선 방향을 정면으로 보고 있으면 계산 불가
+    const t = (b * d.dot(w0) - n.dot(w0)) / denom;
+    const offsetMm = Math.round(sceneToMm(t) / 10) * 10;
+    setPlaneTool({ ...planeTool, offsetMm, throughPoint: null });
+  }
+
+  function handlePlaneToolTap(clientX: number, clientY: number) {
+    if (!planeTool) return;
+    if (planeTool.kind === "offset") {
+      // 기존 점을 탭하면 그 점을 지나는 평행 평면으로 바뀐다
+      const hit = pickScreenPoint(clientX, clientY);
+      if (hit) setPlaneTool({ ...planeTool, throughPoint: hit });
+      return;
+    }
+    // 선에 수직: 선택한 획의 선분들 중 탭 위치와 가장 가까운 곳
+    const sk = getSketchData(planeTool.sketchId);
+    const target = sk?.edges.find((e) => e.id === planeTool.edgeId);
+    if (!sk || !target) return;
+    const key = strokeKeyOf(target);
+    const byId = new Map(sk.points.map((p) => [p.id, p]));
+    let best: { point: Vec3; dir: Vec3; dist: number } | null = null;
+    for (const e of sk.edges) {
+      if (strokeKeyOf(e) !== key) continue;
+      const from = byId.get(e.fromId);
+      const to = byId.get(e.toId);
+      if (!from || !to) continue;
+      const a = toScreen(vecMm(from));
+      const b = toScreen(vecMm(to));
+      if (!a || !b) continue;
+      const { dist, t } = distToSegment2D({ x: clientX, y: clientY }, a, b);
+      if (dist > 30 || (best && dist >= best.dist)) continue;
+      best = {
+        point: {
+          x: Math.round(from.x + (to.x - from.x) * t),
+          y: Math.round(from.y + (to.y - from.y) * t),
+          z: Math.round(from.z + (to.z - from.z) * t),
+        },
+        dir: { x: to.x - from.x, y: to.y - from.y, z: to.z - from.z },
+        dist,
+      };
+    }
+    if (best) setPlaneTool({ ...planeTool, pick: { point: best.point, dir: best.dir } });
+  }
+
+  // 미리보기(주황 평면 + 오프셋 화살표 + 치수) 그리기
+  useEffect(() => {
+    const group = planeToolGroupRef.current;
+    if (!group) return;
+    for (const obj of [...group.children]) {
+      group.remove(obj); // remove()여야 CSS2D 치수 라벨의 DOM도 같이 사라진다
+      obj.traverse((o) => {
+        const m = o as THREE.Mesh;
+        m.geometry?.dispose();
+        const mat = m.material as THREE.Material | THREE.Material[] | undefined;
+        if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
+        else mat?.dispose();
+      });
+    }
+    if (mode !== "overview") return;
+    const pv = planeToolPreview(planeTool);
+    if (!pv) return;
+    const fp = fakePlane(pv.origin, pv.normal, pv.uAxis);
+    const origin = vecMm(pv.origin);
+    const quat = planeQuaternion(fp);
+
+    const size = CARD_SIZE * 1.4;
+    const card = new THREE.Mesh(
+      new THREE.PlaneGeometry(size, size),
+      new THREE.MeshBasicMaterial({
+        color: SELECT_COLOR,
+        transparent: true,
+        opacity: 0.18,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+    );
+    card.position.copy(origin);
+    card.quaternion.copy(quat);
+    group.add(card);
+    const h = size / 2;
+    const outline = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(-h, -h, 0),
+        new THREE.Vector3(h, -h, 0),
+        new THREE.Vector3(h, h, 0),
+        new THREE.Vector3(-h, h, 0),
+      ]),
+      new THREE.LineBasicMaterial({ color: SELECT_COLOR })
+    );
+    outline.position.copy(origin);
+    outline.quaternion.copy(quat);
+    group.add(outline);
+
+    if (planeTool?.kind === "offset" && pv.base) {
+      const n = vecUnit(pv.normal);
+      const arrow = new THREE.ArrowHelper(
+        n,
+        origin,
+        PLANE_ARROW_LEN,
+        SELECT_COLOR,
+        PLANE_ARROW_LEN * 0.22,
+        PLANE_ARROW_LEN * 0.12
+      );
+      group.add(arrow);
+      // 기준 평면 원점 → 새 평면 원점 점선(띄운 거리 표시)
+      const baseOrigin = vecMm(pv.base.origin);
+      if (baseOrigin.distanceTo(origin) > 1e-6) {
+        const link = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([baseOrigin, origin]),
+          new THREE.LineDashedMaterial({ color: SELECT_COLOR, dashSize: 0.03, gapSize: 0.02 })
+        );
+        link.computeLineDistances();
+        group.add(link);
+      }
+      const labelDiv = createEditableLabelDiv(
+        `${pv.offsetMm}mm`,
+        (mm) => {
+          setPlaneTool((prev) =>
+            prev && prev.kind === "offset" ? { ...prev, offsetMm: Math.round(mm), throughPoint: null } : prev
+          );
+        },
+        true
+      );
+      labelDiv.style.borderColor = "#c2410c";
+      const label = new CSS2DObject(labelDiv);
+      label.position.copy(origin.clone().add(n.clone().multiplyScalar(PLANE_ARROW_LEN * 1.25)));
+      group.add(label);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planeTool, planes, mode]);
 
   // ── 오버뷰: 선 잇기 / 선 지우기 ────────────────────────────────
   function getSketchData(sketchId: string): SketchData | null {
@@ -1752,6 +2045,7 @@ export default function ProjectCanvas({
   // 즉시 취소하고 OrbitControls의 두 손가락 제스처로 넘겨준다.
   function cancelInteractionForMultiTouch() {
     pointerDownRef.current = null;
+    arrowDragRef.current = false;
     if (draggingPointIdRef.current) {
       draggingPointIdRef.current = null;
     }
@@ -1826,6 +2120,12 @@ export default function ProjectCanvas({
 
     pointerDownRef.current = { x: e.clientX, y: e.clientY, time: nowMs() };
 
+    if (mode === "overview" && planeTool?.kind === "offset" && isNearOffsetArrow(e.clientX, e.clientY)) {
+      arrowDragRef.current = true;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      return;
+    }
+
     if (mode === "sketch" && tool === "move") {
       const target = raycastToActivePlane(e.clientX, e.clientY);
       if (target) {
@@ -1893,6 +2193,11 @@ export default function ProjectCanvas({
     const down = pointerDownRef.current;
     pointerDownRef.current = null;
 
+    if (arrowDragRef.current) {
+      arrowDragRef.current = false;
+      return;
+    }
+
     if (draggingPointIdRef.current) {
       const draggedId = draggingPointIdRef.current;
       draggingPointIdRef.current = null;
@@ -1942,6 +2247,10 @@ export default function ProjectCanvas({
       else if (tool === "move") handleActiveEdgeTap(e.clientX, e.clientY);
       return;
     }
+    if (planeTool) {
+      handlePlaneToolTap(e.clientX, e.clientY);
+      return;
+    }
     if (connectMode) {
       handleConnectTap(e.clientX, e.clientY);
       return;
@@ -1970,6 +2279,10 @@ export default function ProjectCanvas({
       return;
     }
 
+    if (arrowDragRef.current && activePointerIdsRef.current.size <= 1) {
+      dragOffsetArrow(e.clientX, e.clientY);
+      return;
+    }
     if (mode === "overview" && connectMode && connectFrom && activePointerIdsRef.current.size <= 1) {
       updateConnectPreview(e.clientX, e.clientY);
       return;
@@ -2033,7 +2346,14 @@ export default function ProjectCanvas({
         if (isUndo) {
           e.preventDefault();
           handleOverviewUndo();
+        } else if (e.key === "Enter" && planeTool) {
+          e.preventDefault();
+          applyPlaneTool();
         } else if (e.key === "Escape") {
+          if (planeTool) {
+            cancelPlaneTool();
+            return;
+          }
           setConnectFrom(null);
           clearConnectPreview();
           setSelectedEdge(null);
@@ -2064,7 +2384,7 @@ export default function ProjectCanvas({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, tool, selectedPointId, selectedActiveEdgeId, selectedEdge, sketchOverrides, freeSketch]);
+  }, [mode, tool, selectedPointId, selectedActiveEdgeId, selectedEdge, sketchOverrides, freeSketch, planeTool]);
 
   function handleClearAll() {
     if (!confirm("현재 스케치의 모든 점과 선을 지울까요? (실행 취소로 되돌릴 수 있습니다)")) return;
@@ -2217,33 +2537,19 @@ export default function ProjectCanvas({
           {mode === "overview" ? (
             <>
               <div className="flex items-center gap-1">
-                <select
-                  value={offsetAxis}
-                  onChange={(e) => setOffsetAxis(e.target.value as Axis)}
-                  className="text-xs border border-gray-300 rounded-md px-1.5 py-1.5 bg-white"
-                >
-                  <option value="XY">XY</option>
-                  <option value="YZ">YZ</option>
-                  <option value="XZ">XZ</option>
-                </select>
-                <input
-                  value={offsetInput}
-                  onChange={(e) => setOffsetInput(e.target.value)}
-                  className="w-20 text-xs border border-gray-300 rounded-md px-2 py-1.5 bg-white"
-                  placeholder="거리(mm)"
-                />
-                <span className="text-[11px] text-gray-400">mm</span>
                 <button
-                  onClick={handleAddOffsetPlane}
-                  disabled={busy}
-                  className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600 disabled:opacity-50"
+                  onClick={startPlaneTool}
+                  disabled={busy || !!planeTool || (!selectedPlane && !selectedEdge)}
+                  className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-700 disabled:opacity-40"
+                  title="평면을 선택하면 오프셋/점 통과 평면, 선을 선택하면 선에 수직인 평면을 만듭니다"
                 >
-                  오프셋 평면 추가
+                  평면 추가
                 </button>
                 <button
                   onClick={() => {
                     if (connectMode) stopConnect();
                     else {
+                      cancelPlaneTool();
                       setConnectMode(true);
                       setSelectedEdge(null);
                       setSelectedPlaneId(null);
@@ -2268,7 +2574,75 @@ export default function ProjectCanvas({
                 </button>
               </div>
 
-              {selectedPlane && (
+              {planeTool && (() => {
+                const pv = planeToolPreview(planeTool);
+                return (
+                  <div className="flex flex-wrap items-center gap-2 text-xs bg-white border border-orange-300 rounded-md px-3 py-1.5">
+                    {planeTool.kind === "offset" ? (
+                      <>
+                        <span className="text-gray-500">
+                          기준 <b className="text-gray-800">{pv?.base?.label}</b> · 오프셋
+                        </span>
+                        <input
+                          type="number"
+                          step={10}
+                          value={pv?.offsetMm ?? 0}
+                          onChange={(e) => {
+                            const v = parseFloat(e.target.value);
+                            setPlaneTool({
+                              ...planeTool,
+                              offsetMm: Number.isNaN(v) ? 0 : Math.round(v),
+                              throughPoint: null,
+                            });
+                          }}
+                          className="w-20 border border-gray-300 rounded px-1.5 py-1"
+                        />
+                        <span className="text-gray-400">mm</span>
+                        <button
+                          onClick={() =>
+                            setPlaneTool({
+                              ...planeTool,
+                              offsetMm: -(pv?.offsetMm ?? 0),
+                              throughPoint: null,
+                            })
+                          }
+                          className="px-2 py-1 rounded border border-gray-300 text-gray-600"
+                        >
+                          방향 반전
+                        </button>
+                        {planeTool.throughPoint && (
+                          <span className="text-orange-700">
+                            점 통과 ({planeTool.throughPoint.x}, {planeTool.throughPoint.y},{" "}
+                            {planeTool.throughPoint.z})
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <span className="text-gray-500">
+                        {planeTool.pick
+                          ? `선 위 위치 (${planeTool.pick.point.x}, ${planeTool.pick.point.y}, ${planeTool.pick.point.z})mm`
+                          : "선 위에서 평면을 세울 위치를 탭하세요"}
+                      </span>
+                    )}
+                    <button
+                      onClick={applyPlaneTool}
+                      disabled={
+                        busy ||
+                        !pv ||
+                        (planeTool.kind === "offset" && !planeTool.throughPoint && pv.offsetMm === 0)
+                      }
+                      className="px-2 py-1 rounded bg-gray-900 text-white disabled:opacity-40"
+                    >
+                      적용
+                    </button>
+                    <button onClick={cancelPlaneTool} className="px-2 py-1 rounded text-gray-400">
+                      취소
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {selectedPlane && !planeTool && (
                 <div className="flex items-center gap-2 text-xs bg-white border border-gray-300 rounded-md px-3 py-1.5">
                   <span className="text-gray-500">
                     선택된 평면: <b className="text-gray-800">{selectedPlane.label}</b>
@@ -2283,7 +2657,7 @@ export default function ProjectCanvas({
                 </div>
               )}
 
-              {selectedEdge && !pendingPerpEdge && (
+              {selectedEdge && !pendingPerpEdge && !planeTool && (
                 <div className="flex items-center gap-2 text-xs bg-white border border-gray-300 rounded-md px-3 py-1.5">
                   <span className="text-gray-500">선 선택됨</span>
                   <button
@@ -2306,14 +2680,6 @@ export default function ProjectCanvas({
                       스케치 열기
                     </button>
                   )}
-                  <button
-                    onClick={() =>
-                      setPendingPerpEdge({ from: selectedEdge.from, to: selectedEdge.to })
-                    }
-                    className="px-2 py-1 rounded bg-gray-900 text-white"
-                  >
-                    이 선에 수직인 평면 만들기
-                  </button>
                 </div>
               )}
             </>
@@ -2512,7 +2878,11 @@ export default function ProjectCanvas({
           )}
           {mode === "overview" && (
             <span>
-              {connectMode
+              {planeTool
+                ? planeTool.kind === "offset"
+                  ? "주황 화살표를 끌거나 치수를 눌러 입력하세요 · 점을 탭하면 그 점을 지나는 평행 평면 · Enter 적용"
+                  : "선 위를 탭해 위치를 정한 뒤 적용하세요 · Esc 취소"
+                : connectMode
                 ? connectFrom
                   ? "이을 끝점을 탭하세요 (빈 곳 탭 또는 Esc로 취소)"
                   : "시작할 점(선 끝점 등)을 탭하세요 · 선을 탭하면 선택"
