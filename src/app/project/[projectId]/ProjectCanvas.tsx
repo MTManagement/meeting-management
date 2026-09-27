@@ -510,8 +510,8 @@ function getDotTexture() {
   dotTexture = new THREE.CanvasTexture(c);
   return dotTexture;
 }
-const DOT_PX = 9;
-const DOT_SELECTED_PX = 14;
+const DOT_PX = 7;
+const DOT_SELECTED_PX = 10;
 function makeDot(pos: THREE.Vector3, color: number, sizePx = DOT_PX) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0], 3));
@@ -610,6 +610,14 @@ export default function ProjectCanvas({
   const previewLineRef = useRef<THREE.Line | null>(null);
   const previewLabelRef = useRef<CSS2DObject | null>(null);
   const draggingPointIdRef = useRef<string | null>(null);
+  // 선택 도구에서 선을 잡고 끌면 그 획(사각형·원·직선·펜선) 전체를 옮긴다.
+  const strokeDragRef = useRef<{
+    key: string;
+    edgeId: string;
+    grab: THREE.Vector3;
+    orig: Map<string, THREE.Vector3>;
+    labelOrig: THREE.Vector3 | null;
+  } | null>(null);
   // 손가락/펜/마우스로 누른 채 그은 궤적(삐뚤빼뚤해도 됨). 떼면 시작~끝을
   // 잇는 직선으로 확정된다.
   const strokeActiveRef = useRef(false);
@@ -1133,9 +1141,10 @@ export default function ProjectCanvas({
   }
   // 점 하나가 움직였을 때, 그 점이 끝점인 모든 선의 지오메트리와 치수
   // 라벨을 다시 계산한다 (점 드래그 중 실시간으로 호출됨).
-  function refreshEdgesForPoint(pointId: string) {
+  function refreshEdgesForPoint(pointIds: string | Set<string>) {
+    const ids = typeof pointIds === "string" ? new Set([pointIds]) : pointIds;
     for (const [edgeId, e] of activeEdgesRef.current) {
-      if (e.fromId !== pointId && e.toId !== pointId) continue;
+      if (!ids.has(e.fromId) && !ids.has(e.toId)) continue;
       const from = activePointsRef.current.get(e.fromId);
       const to = activePointsRef.current.get(e.toId);
       if (!from || !to) continue;
@@ -1359,15 +1368,38 @@ export default function ProjectCanvas({
   // OrbitControls의 내부 회전 계산 기준이 어긋나서 두 손가락 회전이
   // 이상하게 멈추거나 꼬이는 문제가 생긴다. camera.up은 항상 월드 Z로
   // 고정해두고, 위치·바라보는 방향만 평면에 맞춘다.
-  function snapCameraFlat(plane: PlaneData) {
+  // keepZoom: 지금 확대/축소 거리 유지. keepPan: 지금 보고 있는 위치(평면 위로 내린 점)를 유지.
+  function snapCameraFlat(plane: PlaneData, opts: { keepZoom?: boolean; keepPan?: boolean } = {}) {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     if (!camera || !controls) return;
     const { origin, normal } = planeBasis(plane);
-    camera.position.copy(origin.clone().add(normal.clone().multiplyScalar(FLAT_DISTANCE)));
+    const dist = opts.keepZoom ? camera.position.distanceTo(controls.target) : FLAT_DISTANCE;
+    const target = opts.keepPan
+      ? controls.target.clone().sub(normal.clone().multiplyScalar(normal.dot(controls.target.clone().sub(origin))))
+      : origin.clone();
+    camera.position.copy(target.clone().add(normal.clone().multiplyScalar(dist)));
     camera.up.set(0, 0, 1);
-    controls.target.copy(origin);
-    camera.lookAt(origin);
+    controls.target.copy(target);
+    camera.lookAt(target);
+    controls.update();
+  }
+
+  // 뷰 버튼: 스케치 안에서는 처음 정면 뷰로, 오버뷰에서는 처음 비스듬한 뷰로
+  // 돌아간다. 확대/축소 상태는 그대로 유지한다.
+  function resetView() {
+    if (mode === "sketch" && activePlane) {
+      snapCameraFlat(activePlane, { keepZoom: true });
+      return;
+    }
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls) return;
+    const dist = camera.position.distanceTo(controls.target);
+    controls.target.set(0, 0, 0);
+    camera.position.copy(new THREE.Vector3(1.9, 2.5, 1.6).normalize().multiplyScalar(dist));
+    camera.up.set(0, 0, 1);
+    camera.lookAt(controls.target);
     controls.update();
   }
 
@@ -1381,6 +1413,15 @@ export default function ProjectCanvas({
     undoStackRef.current = [];
     for (const p of sketch.points) activePointsRef.current.set(p.id, p);
     for (const e of sketch.edges) activeEdgesRef.current.set(e.id, e);
+    // 예전에 드래그로 그은 직선은 끝점이 숨겨져 저장돼 있다 — 직선(선분 하나짜리 획)의
+    // 양끝은 항상 점으로 보여서 끌어 수정할 수 있게 한다.
+    for (const [key, group] of groupByStroke(sketch.edges)) {
+      if (group.length !== 1 || key.startsWith(RECT_PREFIX) || key.startsWith(CIRCLE_PREFIX)) continue;
+      for (const id of [group[0].fromId, group[0].toId]) {
+        const p = activePointsRef.current.get(id);
+        if (p && p.isVertex === false) activePointsRef.current.set(id, { ...p, isVertex: true });
+      }
+    }
     for (const [id, p] of activePointsRef.current) {
       if (p.isVertex !== false) addActivePointMesh(id, p);
     }
@@ -1427,7 +1468,7 @@ export default function ProjectCanvas({
     setPendingPerpEdge(null);
     setSelectedPointId(null);
     setSelectedActiveEdgeId(null);
-    snapCameraFlat(plane);
+    snapCameraFlat(plane, { keepZoom: true }); // 확대/축소 상태는 유지
   }
 
   // "나가기"는 저장을 기다리지 않고 바로 나간다. 편집한 내용은 화면용
@@ -2801,6 +2842,7 @@ export default function ProjectCanvas({
     if (draggingPointIdRef.current) {
       draggingPointIdRef.current = null;
     }
+    cancelStrokeDrag();
     if (strokeActiveRef.current) {
       strokeActiveRef.current = false;
       strokeRawPointsRef.current = [];
@@ -2894,6 +2936,12 @@ export default function ProjectCanvas({
         pushUndoSnapshot();
         draggingPointIdRef.current = pointId;
         e.currentTarget.setPointerCapture(e.pointerId);
+        return;
+      }
+      const edgeId = pickActiveEdge(e.clientX, e.clientY);
+      if (edgeId) {
+        startStrokeDrag(edgeId, raw);
+        e.currentTarget.setPointerCapture(e.pointerId);
       }
     } else if (tool === "free" || (tool === "line" && !chainMode)) {
       // 매번 새로운 독립된 선으로 시작한다 — 이전 선의 끝점에 자동으로
@@ -2916,9 +2964,70 @@ export default function ProjectCanvas({
   }
 
   function handleActiveEdgeTap(clientX: number, clientY: number) {
+    selectActiveEdge(pickActiveEdge(clientX, clientY));
+  }
+
+  function startStrokeDrag(edgeId: string, raw: THREE.Vector3) {
+    const e = activeEdgesRef.current.get(edgeId);
+    const from = e && activePointsRef.current.get(e.fromId);
+    const to = e && activePointsRef.current.get(e.toId);
+    if (!e || !from || !to) return;
+    const key = strokeKeyOf(e);
+    const orig = new Map<string, THREE.Vector3>();
+    for (const se of activeEdgesRef.current.values()) {
+      if (strokeKeyOf(se) !== key) continue;
+      for (const id of [se.fromId, se.toId]) {
+        const p = activePointsRef.current.get(id);
+        if (p && !orig.has(id)) orig.set(id, vecMm(p));
+      }
+    }
+    pushUndoSnapshot();
+    strokeDragRef.current = {
+      key,
+      edgeId,
+      grab: closestPointOnSegment(raw, vecMm(from), vecMm(to)),
+      orig,
+      labelOrig: activeShapeLabelsRef.current.get(key)?.position.clone() ?? null,
+    };
+    selectActiveEdge(edgeId);
+  }
+  // 잡은 자리 기준으로 옮긴다. 잡은 자리가 원점·끝점 등에 가까우면 거기에 붙는다(선 위는 제외).
+  function dragStrokeTo(raw: THREE.Vector3) {
+    const d = strokeDragRef.current;
+    if (!d) return;
+    const hit = findObjectSnap(raw, new Set(d.orig.keys()));
+    const pointHit = hit && hit.kind !== "on" ? hit : null;
+    showSnapMarker(pointHit);
+    const target = pointHit ? pointHit.pos : applySnap(raw);
+    moveStrokeBy(d, target.clone().sub(d.grab));
+  }
+  function moveStrokeBy(d: NonNullable<typeof strokeDragRef.current>, delta: THREE.Vector3) {
+    for (const [id, o] of d.orig) {
+      const rec = activePointsRef.current.get(id);
+      if (!rec) continue;
+      const pos = o.clone().add(delta);
+      rec.x = sceneToMm(pos.x);
+      rec.y = sceneToMm(pos.y);
+      rec.z = sceneToMm(pos.z);
+      activePointMeshesRef.current.get(id)?.position.copy(vecMm(rec));
+    }
+    refreshEdgesForPoint(new Set(d.orig.keys()));
+    const label = activeShapeLabelsRef.current.get(d.key);
+    if (label && d.labelOrig) label.position.copy(d.labelOrig.clone().add(delta));
+  }
+  function cancelStrokeDrag() {
+    const d = strokeDragRef.current;
+    if (!d) return;
+    moveStrokeBy(d, new THREE.Vector3());
+    undoStackRef.current.pop();
+    strokeDragRef.current = null;
+    hideSnapMarker();
+  }
+
+  function pickActiveEdge(clientX: number, clientY: number): string | null {
     const mount = mountRef.current;
     const camera = cameraRef.current;
-    if (!mount || !camera) return;
+    if (!mount || !camera) return null;
     const rect = mount.getBoundingClientRect();
     const mouse = new THREE.Vector2(
       ((clientX - rect.left) / rect.width) * 2 - 1,
@@ -2931,14 +3040,11 @@ export default function ProjectCanvas({
     (raycaster.params as Record<string, unknown>).Line2 = { threshold: 18 };
     raycaster.setFromCamera(mouse, camera);
     const hits = raycaster.intersectObjects(activeEdgeGroupRef.current?.children ?? [], false);
-    if (hits.length === 0) {
-      selectActivePoint(null);
-      return;
-    }
-    const edgeId = [...activeEdgeLinesRef.current.entries()].find(
-      ([, line]) => line === hits[0].object
-    )?.[0];
-    selectActiveEdge(edgeId ?? null);
+    if (hits.length === 0) return null;
+    return (
+      [...activeEdgeLinesRef.current.entries()].find(([, line]) => line === hits[0].object)?.[0] ??
+      null
+    );
   }
 
   function handlePointerUp(e: React.PointerEvent) {
@@ -2957,6 +3063,17 @@ export default function ProjectCanvas({
 
     if (arrowDragRef.current) {
       arrowDragRef.current = false;
+      return;
+    }
+
+    if (strokeDragRef.current) {
+      const wasTap = down && isTap(down, { x: e.clientX, y: e.clientY });
+      if (wasTap) cancelStrokeDrag(); // 거의 안 움직였으면 이동이 아니라 선택만(원위치)
+      else {
+        strokeDragRef.current = null;
+        hideSnapMarker();
+        dirtyRef.current = true;
+      }
       return;
     }
 
@@ -3006,10 +3123,10 @@ export default function ProjectCanvas({
         // (선으로 이어지지도 않는 외톨이 점만 남는 걸 막기 위해).
       } else if (wasStraight) {
         // 직선 도구 또는 1초 멈춤으로 전환 → 시작점~끝점 직선.
-        // 드래그로 그은 선이라 점은 안 보여주고 치수만 보여준다.
+        // 양끝에 점을 표시해서 선택 도구로 끝점을 끌어 수정할 수 있게 한다.
         pushUndoSnapshot();
-        commitDrawPointFromRaw(rawPoints[0], false, true, false);
-        commitDrawPointFromRaw(rawPoints[rawPoints.length - 1], true, true, false);
+        commitDrawPointFromRaw(rawPoints[0], false, true, true);
+        commitDrawPointFromRaw(rawPoints[rawPoints.length - 1], true, true, true);
       } else {
         // 자유곡선 그대로(삐뚤빼뚤 유지) → 궤적을 따라 여러 점으로 커밋
         pushUndoSnapshot();
@@ -3072,6 +3189,12 @@ export default function ProjectCanvas({
     lastPointerTypeRef.current = e.pointerType;
     const toMm = (v: THREE.Vector3) => ({ x: sceneToMm(v.x), y: sceneToMm(v.y), z: sceneToMm(v.z) });
 
+    if (strokeDragRef.current) {
+      const raw = raycastToActivePlane(e.clientX, e.clientY);
+      if (raw) dragStrokeTo(raw);
+      return;
+    }
+
     if (draggingPointIdRef.current) {
       const raw = raycastToActivePlane(e.clientX, e.clientY);
       if (!raw) return;
@@ -3125,7 +3248,10 @@ export default function ProjectCanvas({
   function handleSetTool(next: Tool) {
     // 선택 → 그리기 도구로 바꿀 때만 평면 정면으로 카메라를 맞춘다
     // (그리기 도구끼리 바꿀 때는 보던 화면을 유지).
-    if (tool === "select" && next !== "select" && activePlane) snapCameraFlat(activePlane);
+    // 확대 상태와 보던 위치는 유지하고 방향만 정면으로 돌린다.
+    if (tool === "select" && next !== "select" && activePlane) {
+      snapCameraFlat(activePlane, { keepZoom: true, keepPan: true });
+    }
     setTool(next);
     cancelShape();
     lastPointIdRef.current = null;
@@ -3394,6 +3520,17 @@ export default function ProjectCanvas({
                   실행 취소
                 </button>
               </div>
+              <button
+                onClick={resetView}
+                className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
+                title="처음 보던 방향으로 되돌립니다 (확대/축소 상태는 유지)"
+              >
+                <svg viewBox="0 0 20 20" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 7 V3 H7 M13 3 H17 V7 M17 13 V17 H13 M7 17 H3 V13" />
+                  <rect x="7" y="7" width="6" height="6" />
+                </svg>
+                기본 뷰
+              </button>
 
               {planeTool && (() => {
                 const pv = planeToolPreview(planeTool);
@@ -3534,6 +3671,17 @@ export default function ProjectCanvas({
                   </button>
                 ))}
               </div>
+              <button
+                onClick={resetView}
+                className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
+                title="스케치를 처음 정면 뷰로 되돌립니다 (확대/축소 상태는 유지)"
+              >
+                <svg viewBox="0 0 20 20" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 7 V3 H7 M13 3 H17 V7 M17 13 V17 H13 M7 17 H3 V13" />
+                  <rect x="7" y="7" width="6" height="6" />
+                </svg>
+                정면 뷰
+              </button>
 
               {tool === "line" && (
                 <label
