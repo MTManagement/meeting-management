@@ -8,6 +8,9 @@ import {
   CSS2DRenderer,
   CSS2DObject,
 } from "three/examples/jsm/renderers/CSS2DRenderer.js";
+import { Line2 } from "three/examples/jsm/lines/Line2.js";
+import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
+import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import {
   createOffsetPlane,
   createPerpendicularPlane,
@@ -37,6 +40,8 @@ const REF_EDGE = 0x9c9178; // 저장된 스케치의 실제 선/점 (구성선�
 const PLANE_CARD = 0x9a9284;
 const PLANE_CARD_ACTIVE = 0x4b4b4b;
 const SELECT_COLOR = 0xc2410c; // 선택된 선/끝점 강조색 (주황)
+const EDGE_WIDTH_PX = 2.5; // 손그림 느낌을 위한 선 두께(화면 픽셀)
+const EDGE_WIDTH_SELECTED_PX = 3.5;
 const CARD_SIZE = 0.3; // scene 단위 (=300mm)
 const GRID_SIZE = 10; // scene 단위 (=10m)
 const BASE_GRID_WIDTH_MM = 1000; // XY 평면에 항상 깔아두는 모눈종이 크기 (가로, X)
@@ -56,6 +61,25 @@ function sceneToMm(units: number) {
 
 function vecMm(v: Vec3) {
   return new THREE.Vector3(mmToScene(v.x), mmToScene(v.y), mmToScene(v.z));
+}
+
+// 모눈종이를 옅은 점(dot) 격자로 그리기 위한 좌표 배열. 로컬 XY 평면
+// 기준(원점 중심)으로 만들고, 실제 평면 위치/방향은 호출부에서
+// position/quaternion으로 맞춘다.
+function makeDotGridPositions(widthMm: number, depthMm: number, spacingMm: number): Float32Array {
+  const wSeg = Math.max(1, Math.round(widthMm / spacingMm));
+  const hSeg = Math.max(1, Math.round(depthMm / spacingMm));
+  const w = mmToScene(widthMm);
+  const h = mmToScene(depthMm);
+  const positions: number[] = [];
+  for (let j = 0; j <= hSeg; j++) {
+    const y = -h / 2 + (j / hSeg) * h;
+    for (let i = 0; i <= wSeg; i++) {
+      const x = -w / 2 + (i / wSeg) * w;
+      positions.push(x, y, 0);
+    }
+  }
+  return new Float32Array(positions);
 }
 function vecUnit(v: Vec3) {
   return new THREE.Vector3(v.x, v.y, v.z).normalize();
@@ -213,9 +237,11 @@ export default function ProjectCanvas({
   const activeEdgeGroupRef = useRef<THREE.Group | null>(null);
   const activeLabelGroupRef = useRef<THREE.Group | null>(null);
   const previewGroupRef = useRef<THREE.Group | null>(null);
+  // 굵은 선(Line2)은 화면 픽셀 해상도를 알아야 제대로 된 두께로 그려진다.
+  const lineResolutionRef = useRef(new THREE.Vector2(1, 1));
 
   const activePointMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
-  const activeEdgeLinesRef = useRef<Map<string, THREE.Line>>(new Map());
+  const activeEdgeLinesRef = useRef<Map<string, Line2>>(new Map());
   const activeEdgeLabelsRef = useRef<Map<string, CSS2DObject>>(new Map());
   const activePointsRef = useRef<Map<string, PointRec>>(new Map());
   const activeEdgesRef = useRef<Map<string, EdgeRec>>(new Map());
@@ -323,6 +349,7 @@ export default function ProjectCanvas({
     camera.position.set(1.9, 2.5, 1.6);
     camera.up.set(0, 0, 1); // Z축을 상하(수직) 방향으로 사용
     cameraRef.current = camera;
+    lineResolutionRef.current.set(mount.clientWidth, mount.clientHeight);
 
     mount.style.position = "relative";
 
@@ -389,21 +416,26 @@ export default function ProjectCanvas({
     }
 
     // ── XY 평면(바닥) 기준 모눈종이 — 항상 원점 중심으로 깔아둬서,
-    // 사용자가 평면도 그리듯 감을 잡을 수 있게 한다. PlaneGeometry는
-    // 기본으로 XY 평면(법선 Z)에 원점 중심으로 놓이므로 회전이 필요 없다.
+    // 사용자가 평면도 그리듯 감을 잡을 수 있게 한다. 스케치 종이 느낌을
+    // 살리려고 선 격자 대신 옅은 점(dot) 격자로 그린다. 원점 중심 XY
+    // 평면 배치이므로 회전이 필요 없다.
     {
-      const w = mmToScene(BASE_GRID_WIDTH_MM);
-      const h = mmToScene(BASE_GRID_DEPTH_MM);
-      const wSeg = Math.round(BASE_GRID_WIDTH_MM / BASE_GRID_SPACING_MM);
-      const hSeg = Math.round(BASE_GRID_DEPTH_MM / BASE_GRID_SPACING_MM);
-      const geo = new THREE.PlaneGeometry(w, h, wSeg, hSeg);
-      const mat = new THREE.MeshBasicMaterial({
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute(
+        "position",
+        new THREE.BufferAttribute(
+          makeDotGridPositions(BASE_GRID_WIDTH_MM, BASE_GRID_DEPTH_MM, BASE_GRID_SPACING_MM),
+          3
+        )
+      );
+      const mat = new THREE.PointsMaterial({
         color: PENCIL_DIM,
-        wireframe: true,
+        size: 3,
+        sizeAttenuation: false,
         transparent: true,
-        opacity: 0.6,
+        opacity: 0.7,
       });
-      scene.add(new THREE.Mesh(geo, mat));
+      scene.add(new THREE.Points(geo, mat));
     }
 
     const planeCardGroup = new THREE.Group();
@@ -445,6 +477,18 @@ export default function ProjectCanvas({
       camera.updateProjectionMatrix();
       renderer.setSize(mount.clientWidth, mount.clientHeight);
       labelRenderer.setSize(mount.clientWidth, mount.clientHeight);
+      lineResolutionRef.current.set(mount.clientWidth, mount.clientHeight);
+      // 이미 만들어진 굵은 선(Line2)들도 새 해상도를 반영해야 두께가
+      // 화면 회전/크기 변경 후에도 정확하게 유지된다.
+      const existingLines = [
+        ...(activeEdgeGroupRef.current?.children ?? []),
+        ...(refGeometryGroupRef.current?.children ?? []),
+      ];
+      for (const child of existingLines) {
+        if (child instanceof Line2) {
+          child.material.resolution.copy(lineResolutionRef.current);
+        }
+      }
     };
     window.addEventListener("resize", onResize);
 
@@ -509,15 +553,11 @@ export default function ProjectCanvas({
             highlightedPointIds.add(from.id);
             highlightedPointIds.add(to.id);
           }
-          const geo = new THREE.BufferGeometry().setFromPoints([
-            vecMm(from),
-            vecMm(to),
-          ]);
-          const mat = new THREE.LineBasicMaterial({
-            color: isSelectedEdge ? SELECT_COLOR : REF_EDGE,
-            linewidth: isSelectedEdge ? 3 : 1,
-          });
-          const line = new THREE.Line(geo, mat);
+          const line = makeFatLine(
+            [vecMm(from), vecMm(to)],
+            isSelectedEdge ? SELECT_COLOR : REF_EDGE,
+            isSelectedEdge ? EDGE_WIDTH_SELECTED_PX : EDGE_WIDTH_PX
+          );
           line.userData = {
             kind: "edge",
             edgeId: e.id,
@@ -543,6 +583,23 @@ export default function ProjectCanvas({
     }
   }, [planes, activePlaneId, activeSketchId, mode, selectedPlaneId, selectedEdge]);
 
+  // 손그림 느낌을 살리려고 선을 두껍게(화면 픽셀 기준) 그린다. 일반
+  // THREE.Line의 linewidth는 대부분 브라우저(크롬 등)에서 무시되기
+  // 때문에, 실제로 두께가 반영되는 Line2(three.js fat-lines)를 쓴다.
+  function makeFatLine(points: THREE.Vector3[], color: number, widthPx: number): Line2 {
+    const geo = new LineGeometry();
+    geo.setPositions(points.flatMap((p) => [p.x, p.y, p.z]));
+    const mat = new LineMaterial({
+      color,
+      linewidth: widthPx,
+      resolution: lineResolutionRef.current,
+    });
+    return new Line2(geo, mat);
+  }
+  function updateFatLinePositions(line: Line2, points: THREE.Vector3[]) {
+    line.geometry.setPositions(points.flatMap((p) => [p.x, p.y, p.z]));
+  }
+
   // ── 활성 스케치용 점/선 메시 헬퍼 ──────────────────────────────
   function addActivePointMesh(id: string, p: PointRec) {
     const geo = new THREE.SphereGeometry(0.032, 12, 12);
@@ -564,9 +621,7 @@ export default function ProjectCanvas({
     const from = activePointsRef.current.get(e.fromId);
     const to = activePointsRef.current.get(e.toId);
     if (!from || !to) return;
-    const geo = new THREE.BufferGeometry().setFromPoints([vecMm(from), vecMm(to)]);
-    const mat = new THREE.LineBasicMaterial({ color: PENCIL });
-    const line = new THREE.Line(geo, mat);
+    const line = makeFatLine([vecMm(from), vecMm(to)], PENCIL, EDGE_WIDTH_PX);
     line.userData = { kind: "edge", sketchId: activeSketchId, from, to };
     activeEdgeGroupRef.current?.add(line);
     activeEdgeLinesRef.current.set(e.id, line);
@@ -624,12 +679,9 @@ export default function ProjectCanvas({
 
       const line = activeEdgeLinesRef.current.get(edgeId);
       if (line) {
-        const posAttr = line.geometry.attributes.position as THREE.BufferAttribute;
         const fromVec = vecMm(from);
         const toVec = vecMm(to);
-        posAttr.setXYZ(0, fromVec.x, fromVec.y, fromVec.z);
-        posAttr.setXYZ(1, toVec.x, toVec.y, toVec.z);
-        posAttr.needsUpdate = true;
+        updateFatLinePositions(line, [fromVec, toVec]);
         line.userData = { ...line.userData, from, to };
       }
 
@@ -655,25 +707,34 @@ export default function ProjectCanvas({
     if (!scene || !gridGroup) return;
 
     while (gridGroup.children.length) {
-      const obj = gridGroup.children.pop() as THREE.Mesh;
+      const obj = gridGroup.children.pop() as THREE.Points;
       obj.geometry.dispose();
       (obj.material as THREE.Material).dispose();
     }
 
     if (mode !== "sketch" || !activePlane) return;
 
-    const geo = new THREE.PlaneGeometry(GRID_SIZE, GRID_SIZE, GRID_SIZE, GRID_SIZE);
-    const mat = new THREE.MeshBasicMaterial({
+    const gridSizeMm = GRID_SIZE * MM_PER_SCENE_UNIT;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute(
+      "position",
+      new THREE.BufferAttribute(
+        makeDotGridPositions(gridSizeMm, gridSizeMm, BASE_GRID_SPACING_MM),
+        3
+      )
+    );
+    const mat = new THREE.PointsMaterial({
       color: PENCIL_DIM,
-      wireframe: true,
+      size: 3,
+      sizeAttenuation: false,
       transparent: true,
       opacity: 0.6,
     });
-    const mesh = new THREE.Mesh(geo, mat);
+    const points = new THREE.Points(geo, mat);
     const { origin } = planeBasis(activePlane);
-    mesh.position.copy(origin);
-    mesh.quaternion.copy(planeQuaternion(activePlane));
-    gridGroup.add(mesh);
+    points.position.copy(origin);
+    points.quaternion.copy(planeQuaternion(activePlane));
+    gridGroup.add(points);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, activePlaneId]);
 
@@ -1217,7 +1278,9 @@ export default function ProjectCanvas({
       mesh.scale.setScalar(isSel ? 1.6 : 1);
     }
     for (const [id, line] of activeEdgeLinesRef.current) {
-      (line.material as THREE.LineBasicMaterial).color.set(id === edgeId ? SELECT_COLOR : PENCIL);
+      const isSel = id === edgeId;
+      line.material.color.set(isSel ? SELECT_COLOR : PENCIL);
+      line.material.linewidth = isSel ? EDGE_WIDTH_SELECTED_PX : EDGE_WIDTH_PX;
     }
   }
   function selectActivePoint(id: string | null) {
