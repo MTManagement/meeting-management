@@ -51,8 +51,8 @@ const EDGE_WIDTH_PX = 2.5; // 손그림 느낌을 위한 선 두께(화면 픽�
 const EDGE_WIDTH_SELECTED_PX = 3.5;
 const CARD_SIZE = 0.3; // scene 단위 (=300mm)
 const GRID_SIZE = 10; // scene 단위 (=10m)
-const BASE_GRID_WIDTH_MM = 1000; // XY 평면에 항상 깔아두는 모눈종이 크기 (가로, X)
-const BASE_GRID_DEPTH_MM = 2000; // 모눈종이 크기 (세로, Y)
+const BASE_GRID_WIDTH_MM = 5000; // XY 평면에 항상 깔아두는 모눈종이 크기 (가로, X)
+const BASE_GRID_DEPTH_MM = 5000; // 모눈종이 크기 (세로, Y)
 const BASE_GRID_SPACING_MM = 100; // 모눈 한 칸 크기
 const FLAT_DISTANCE = 2.5; // 스케치 정면 뷰 카메라 거리 (scene 단위)
 
