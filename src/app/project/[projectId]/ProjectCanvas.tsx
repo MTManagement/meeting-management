@@ -11,6 +11,8 @@ import {
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import {
   createPlaneFromDefinition,
   createSketch,
@@ -45,6 +47,7 @@ const REF_EDGE = 0x9c9178; // 저장된 스케치의 실제 선/점 (구성선�
 const PLANE_CARD = 0x9a9284;
 const PLANE_CARD_ACTIVE = 0x4b4b4b;
 const SELECT_COLOR = 0xc2410c; // 선택된 선/끝점 강조색 (주황)
+const ERASE_COLOR = 0xdc2626; // 지우개가 지울 선 미리보기 (빨강)
 const EDGE_WIDTH_PX = 2.5; // 손그림 느낌을 위한 선 두께(화면 픽셀)
 const EDGE_WIDTH_SELECTED_PX = 3.5;
 const CARD_SIZE = 0.3; // scene 단위 (=300mm)
@@ -248,14 +251,18 @@ function groupByStroke(edges: Iterable<EdgeRec>) {
 
 // ── 스케치 도구 ────────────────────────────────────────────────────
 // select: 선택·수정(기본) / free: 자유 그리기 / line: 직선 / rect: 사각형 / circle: 원
-type Tool = "select" | "free" | "line" | "rect" | "circle";
+type Tool = "select" | "free" | "line" | "rect" | "circle" | "eraseObj" | "eraseSeg";
 const TOOL_DEFS: { id: Tool; key: string; title: string }[] = [
   { id: "select", key: "v", title: "선택·수정 (V) — 점을 끌어 이동, 선을 탭해 선택" },
   { id: "free", key: "p", title: "자유 그리기 (P) — 그은 궤적 그대로, 1초 멈추면 직선" },
   { id: "line", key: "l", title: "직선 (L) — 누른 채 끌어서 직선, 이어그리기 가능" },
   { id: "rect", key: "r", title: "사각형 (R) — 한 꼭짓점과 대각선 꼭짓점을 찍어서" },
   { id: "circle", key: "c", title: "원 (C) — 중심을 찍고 크기를 정해서" },
+  { id: "eraseObj", key: "e", title: "개체 지우개 (E) — 선을 탭하거나 문지르면 그 개체(한 획) 전체를 지웁니다" },
+  { id: "eraseSeg", key: "t", title: "조각 지우개 (T) — 다른 선과 만나는 교차점 사이 조각만 지웁니다" },
 ];
+const isDrawTool = (t: Tool) => t === "free" || t === "line" || t === "rect" || t === "circle";
+const isEraseTool = (t: Tool) => t === "eraseObj" || t === "eraseSeg";
 
 // 사각형·원은 DB 구조를 바꾸지 않고 획 id(strokeId) 앞에 도형 종류를
 // 붙여 저장한다. 나중에 진짜 원/사각형 타입으로 옮길 때 이 표시로 변환한다.
@@ -268,6 +275,9 @@ const RECT_TOL = 0.002; // scene 단위 ≈ 2mm, 좌표가 mm로 반올림돼 �
 // 붙는 거리는 mm가 아니라 화면 픽셀 기준 — 확대/축소와 무관하게 손맛이 같다.
 const SNAP_PX_MOUSE = 14;
 const SNAP_PX_TOUCH = 28;
+// 선을 탭/클릭해서 고를 때 허용 거리(화면 픽셀)
+const PICK_PX_MOUSE = 10;
+const PICK_PX_TOUCH = 22;
 const ON_PLANE_TOL = 0.001; // scene 단위 ≈ 1mm, 다른 스케치가 이 평면 위에 있는지 판정
 
 type SnapKind = "origin" | "end" | "mid" | "center" | "cross" | "on";
@@ -445,6 +455,178 @@ function buildOtherSnapRefs(plane: PlaneData, sketches: SketchData[]): SnapRefs 
   return refs;
 }
 
+// ── 조각 지우개(CAD의 트림): 누른 자리에서 획을 따라 양쪽으로 가다가 처음
+// 만나는 교차점(다른 선·자기 자신과 엇갈리는 곳·다른 선 끝이 닿은 곳)까지를 지울 조각으로 본다.
+// 결과는 선분마다 지울 구간 [t0, t1] (선분 from→to 기준 0~1).
+type UV = { u: number; v: number };
+const TRIM_TOL = 0.0015; // scene 단위 ≈ 1.5mm — mm 반올림으로 살짝 떨어진 T자 접점도 교차로 본다
+const T_EPS = 1e-6;
+
+function segCrossT(p0: UV, p1: UV, q0: UV, q1: UV, tol: number): number | null {
+  const rx = p1.u - p0.u;
+  const ry = p1.v - p0.v;
+  const sx = q1.u - q0.u;
+  const sy = q1.v - q0.v;
+  const pLen = Math.hypot(rx, ry);
+  const qLen = Math.hypot(sx, sy);
+  if (pLen < 1e-9 || qLen < 1e-9) return null;
+  const den = rx * sy - ry * sx;
+  if (Math.abs(den) < 1e-9 * pLen * qLen) return null; // 평행(겹침은 교차로 보지 않음)
+  const qpx = q0.u - p0.u;
+  const qpy = q0.v - p0.v;
+  const t = (qpx * sy - qpy * sx) / den;
+  const s = (qpx * ry - qpy * rx) / den;
+  const tTol = tol / pLen;
+  const sTol = tol / qLen;
+  if (t < -tTol || t > 1 + tTol || s < -sTol || s > 1 + sTol) return null;
+  return Math.min(1, Math.max(0, t));
+}
+
+function computeTrimPiece(
+  plane: PlaneData,
+  points: Map<string, PointRec>,
+  edges: Map<string, EdgeRec>,
+  extraCutters: [THREE.Vector3, THREE.Vector3][],
+  edgeId: string,
+  at: THREE.Vector3
+): Map<string, [number, number][]> | null {
+  const e0 = edges.get(edgeId);
+  if (!e0) return null;
+  const key = strokeKeyOf(e0);
+  const uvCache = new Map<string, UV>();
+  const uvOf = (id: string) => {
+    let uv = uvCache.get(id);
+    if (!uv) {
+      const p = points.get(id);
+      uv = p ? toLocalUV(plane, vecMm(p)) : { u: 0, v: 0 };
+      uvCache.set(id, uv);
+    }
+    return uv;
+  };
+
+  type Cutter = { a: UV; b: UV; minU: number; maxU: number; minV: number; maxV: number; same?: EdgeRec };
+  const cutters: Cutter[] = [];
+  const addCutter = (a: UV, b: UV, same?: EdgeRec) =>
+    cutters.push({
+      a,
+      b,
+      minU: Math.min(a.u, b.u) - TRIM_TOL,
+      maxU: Math.max(a.u, b.u) + TRIM_TOL,
+      minV: Math.min(a.v, b.v) - TRIM_TOL,
+      maxV: Math.max(a.v, b.v) + TRIM_TOL,
+      same,
+    });
+  const adj = new Map<string, EdgeRec[]>();
+  for (const e of edges.values()) {
+    if (!points.has(e.fromId) || !points.has(e.toId)) continue;
+    const inStroke = strokeKeyOf(e) === key;
+    addCutter(uvOf(e.fromId), uvOf(e.toId), inStroke ? e : undefined);
+    if (!inStroke) continue;
+    for (const id of [e.fromId, e.toId]) {
+      const list = adj.get(id);
+      if (list) list.push(e);
+      else adj.set(id, [e]);
+    }
+  }
+  for (const [a, b] of extraCutters) addCutter(toLocalUV(plane, a), toLocalUV(plane, b));
+
+  const cutCache = new Map<string, number[]>();
+  const cutsOf = (e: EdgeRec) => {
+    const cached = cutCache.get(e.id);
+    if (cached) return cached;
+    const a = uvOf(e.fromId);
+    const b = uvOf(e.toId);
+    const minU = Math.min(a.u, b.u);
+    const maxU = Math.max(a.u, b.u);
+    const minV = Math.min(a.v, b.v);
+    const maxV = Math.max(a.v, b.v);
+    const ts: number[] = [];
+    for (const c of cutters) {
+      if (c.maxU < minU || c.minU > maxU || c.maxV < minV || c.minV > maxV) continue;
+      let tol = TRIM_TOL;
+      if (c.same) {
+        // 같은 획: 이웃 선분(점을 공유)은 건너뛰고, 진짜로 엇갈릴 때만 교차로 본다.
+        if (c.same.id === e.id) continue;
+        const s = c.same;
+        if (s.fromId === e.fromId || s.fromId === e.toId || s.toId === e.fromId || s.toId === e.toId) continue;
+        tol = 0;
+      }
+      const t = segCrossT(a, b, c.a, c.b, tol);
+      if (t !== null) ts.push(t);
+    }
+    ts.sort((x, y) => x - y);
+    cutCache.set(e.id, ts);
+    return ts;
+  };
+
+  const removed = new Map<string, [number, number][]>();
+  const addIv = (id: string, t0: number, t1: number) => {
+    const list = removed.get(id);
+    if (list) list.push([t0, t1]);
+    else removed.set(id, [[t0, t1]]);
+  };
+
+  const a0 = vecMm(points.get(e0.fromId)!);
+  const b0 = vecMm(points.get(e0.toId)!);
+  const ab = b0.clone().sub(a0);
+  const tAt = ab.lengthSq() > 1e-12 ? Math.min(1, Math.max(0, at.clone().sub(a0).dot(ab) / ab.lengthSq())) : 0.5;
+
+  const walk = (forward: boolean) => {
+    let e = e0;
+    let t = tAt;
+    let fwd = forward;
+    const visited = new Set<string>();
+    for (;;) {
+      const cuts = cutsOf(e);
+      let cut: number | null = null;
+      if (fwd) {
+        for (const c of cuts) if (c > t + T_EPS) { cut = c; break; }
+      } else {
+        for (let i = cuts.length - 1; i >= 0; i--) if (cuts[i] < t - T_EPS) { cut = cuts[i]; break; }
+      }
+      if (cut !== null) {
+        addIv(e.id, fwd ? t : cut, fwd ? cut : t);
+        return;
+      }
+      addIv(e.id, fwd ? t : 0, fwd ? 1 : t);
+      visited.add(e.id);
+      const node = fwd ? e.toId : e.fromId;
+      const nexts = (adj.get(node) ?? []).filter((x) => x.id !== e.id);
+      if (nexts.length !== 1) return; // 획 끝 또는 갈림길
+      const n = nexts[0];
+      if (n.id === e0.id || visited.has(n.id)) return; // 닫힌 도형을 한 바퀴 돎
+      fwd = n.fromId === node;
+      t = fwd ? 0 : 1;
+      // 들어가는 자리(node)에 바로 교차점이 있으면 거기서 멈춘다
+      const nc = cutsOf(n);
+      if (fwd ? nc.some((c) => c <= T_EPS) : nc.some((c) => c >= 1 - T_EPS)) return;
+      e = n;
+    }
+  };
+  walk(true);
+  walk(false);
+  return removed;
+}
+
+// 지울 구간들을 합쳐서 남길 구간(0~1 중 나머지)을 돌려준다.
+function keptIntervals(removed: [number, number][], minLen: number): [number, number][] {
+  const sorted = [...removed].sort((x, y) => x[0] - y[0]);
+  const merged: [number, number][] = [];
+  for (const [a, b] of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && a <= last[1] + T_EPS) last[1] = Math.max(last[1], b);
+    else merged.push([a, b]);
+  }
+  const kept: [number, number][] = [];
+  let cur = 0;
+  for (const [a, b] of merged) {
+    if (a - cur > minLen) kept.push([cur, a]);
+    cur = Math.max(cur, b);
+  }
+  if (1 - cur > minLen) kept.push([cur, 1]);
+  return kept;
+}
+
 function ToolIcon({ kind }: { kind: Tool }) {
   const common = {
     viewBox: "0 0 20 20",
@@ -492,7 +674,36 @@ function ToolIcon({ kind }: { kind: Tool }) {
           <circle cx="10" cy="10" r="0.9" fill="currentColor" stroke="none" />
         </svg>
       );
+    case "eraseObj":
+      // 큰 지우개 + 바닥선: 개체 통째로
+      return (
+        <svg {...common}>
+          <path d="M8 16.5 L3.5 12 L11 4.5 L15.5 9 Z" />
+          <path d="M3.5 12 L6.5 9 L11 13.5 L8 16.5 Z" fill="currentColor" fillOpacity="0.35" />
+          <path d="M8 16.5 H17" />
+        </svg>
+      );
+    case "eraseSeg":
+      // 작은 지우개 + 교차점(눈금) 사이만 점선: 조각만
+      return (
+        <svg {...common}>
+          <path d="M9.5 13.5 L6 10 L11.5 4.5 L15 8 Z" strokeWidth={1.3} />
+          <path d="M6 10 L8.2 7.8 L11.7 11.3 L9.5 13.5 Z" fill="currentColor" fillOpacity="0.35" strokeWidth={1.3} />
+          <path d="M2 17 H6 M14 17 H18" />
+          <path d="M6 17 H14" strokeDasharray="1.2 1.6" />
+          <path d="M6 15 V19 M14 15 V19" strokeWidth={1.2} />
+        </svg>
+      );
   }
+}
+
+function UndoIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="w-[18px] h-[18px]" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 12 a8 8 0 1 0 2.35 -5.65 L4 8.7" />
+      <path d="M4 4.5 V8.7 H8.2" />
+    </svg>
+  );
 }
 
 // 점을 화면 크기와 무관하게 항상 같은 픽셀 크기의 동그라미로 그리기
@@ -609,6 +820,19 @@ export default function ProjectCanvas({
 
   const previewLineRef = useRef<THREE.Line | null>(null);
   const previewLabelRef = useRef<CSS2DObject | null>(null);
+  // 지우개: 누른 채 문지르는 동안의 상태(손가락은 움직이기 전까지 지우지 않는다 —
+  // 두 손가락 확대를 하려다 첫 손가락 자리의 선이 지워지는 걸 막기 위해).
+  const eraseGestureRef = useRef<{
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    rubbing: boolean;
+    snapshotPushed: boolean;
+  } | null>(null);
+  const erasePreviewRef = useRef<LineSegments2 | null>(null);
+  // 마지막으로 계산한 "지울 대상" — 같은 조각 위에서 마우스가 움직일 땐 다시 계산하지 않는다.
+  const erasePreviewCacheRef = useRef<Map<string, [number, number][]> | null>(null);
   const draggingPointIdRef = useRef<string | null>(null);
   // 선택 도구에서 선을 잡고 끌면 그 획(사각형·원·직선·펜선) 전체를 옮긴다.
   const strokeDragRef = useRef<{
@@ -814,8 +1038,6 @@ export default function ProjectCanvas({
     cameraRef.current = camera;
     lineResolutionRef.current.set(mount.clientWidth, mount.clientHeight);
 
-    mount.style.position = "relative";
-
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(mount.clientWidth, mount.clientHeight);
@@ -938,7 +1160,7 @@ export default function ProjectCanvas({
     animate();
 
     const onResize = () => {
-      if (!mount) return;
+      if (!mount || mount.clientWidth === 0 || mount.clientHeight === 0) return;
       camera.aspect = mount.clientWidth / mount.clientHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(mount.clientWidth, mount.clientHeight);
@@ -956,11 +1178,14 @@ export default function ProjectCanvas({
         }
       }
     };
-    window.addEventListener("resize", onResize);
+    // 창 크기뿐 아니라 도구 막대가 두 줄로 늘어나 캔버스 높이가 바뀔 때도 맞춘다
+    // (안 맞추면 화면이 늘어져 보이고 탭 위치와 선택 위치가 어긋난다).
+    const resizeObserver = new ResizeObserver(onResize);
+    resizeObserver.observe(mount);
 
     return () => {
       cancelAnimationFrame(raf);
-      window.removeEventListener("resize", onResize);
+      resizeObserver.disconnect();
       controls.dispose();
       renderer.dispose();
       mount.removeChild(renderer.domElement);
@@ -1284,6 +1509,7 @@ export default function ProjectCanvas({
   // 지금 그려진 점/선 상태를 실행 취소 스택에 저장해둔다. 실제로 뭔가를
   // 바꾸는 동작(선 긋기, 점 드래그, 삭제 등) 직전에 호출한다.
   function pushUndoSnapshot() {
+    erasePreviewCacheRef.current = null; // 모양이 바뀌기 직전 — 지우개 대상 계산도 다시 해야 한다
     const points = [...activePointsRef.current.values()].map((p) => ({ ...p }));
     const edges = [...activeEdgesRef.current.values()].map((e) => ({ ...e }));
     undoStackRef.current.push({ points, edges });
@@ -1672,6 +1898,28 @@ export default function ProjectCanvas({
     const t = len2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2)) : 0;
     return { dist: Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t)), t };
   }
+  // three r128의 Line2 레이캐스트(LineSegments2.raycast)는 w 성분을 잘못 넣는 버그가
+  // 있어 굵은 선을 거의 못 잡는다. 선 양끝을 화면에 투영해 픽셀 거리로 직접 고른다.
+  function pickNearestSegment<T>(
+    clientX: number,
+    clientY: number,
+    segs: Iterable<[T, THREE.Vector3, THREE.Vector3]>
+  ): T | null {
+    const maxPx = lastPointerTypeRef.current === "touch" ? PICK_PX_TOUCH : PICK_PX_MOUSE;
+    let best: T | null = null;
+    let bestD = maxPx;
+    for (const [key, a3, b3] of segs) {
+      const a = toScreen(a3);
+      const b = toScreen(b3);
+      if (!a || !b) continue;
+      const { dist } = distToSegment2D({ x: clientX, y: clientY }, a, b);
+      if (dist < bestD) {
+        bestD = dist;
+        best = key;
+      }
+    }
+    return best;
+  }
 
   const PLANE_ARROW_LEN = mmToScene(250);
   // 오프셋 화살표 근처를 눌렀는지(화면 기준 24px 이내)
@@ -2033,41 +2281,41 @@ export default function ProjectCanvas({
       ((clientX - rect.left) / rect.width) * 2 - 1,
       -((clientY - rect.top) / rect.height) * 2 + 1
     );
-    const raycaster = new THREE.Raycaster();
-    raycaster.params.Line = { threshold: 0.08 };
-    // 굵은 선(Line2)은 기본 판정 폭이 선 두께(2.5px)뿐이라 손가락으로는
-    // 거의 못 짚는다. 앞뒤로 넉넉히 여유를 준다(px).
-    (raycaster.params as Record<string, unknown>).Line2 = { threshold: 18 };
-    raycaster.setFromCamera(mouse, camera);
-
-    const targets = [
-      ...(planeCardGroupRef.current?.children ?? []),
-      ...(refGeometryGroupRef.current?.children ?? []),
-    ].filter((o) => !(o instanceof THREE.Points));
-    const hits = raycaster.intersectObjects(targets, false);
-    if (hits.length === 0) {
-      setSelectedPlaneId(null);
-      setSelectedEdge(null);
-      return;
-    }
     // 선이 평면 카드 위를 지나가도 선이 먼저 선택되게 한다
     // (카드가 먼저 잡히면 선 대신 새 스케치가 만들어져 버렸다).
-    const edgeHit = hits.find((h) => h.object.userData.kind === "edge");
-    const obj = (edgeHit ?? hits[0]).object;
-    if (obj.userData.kind === "plane") {
-      setSelectedEdge(null);
-      if (!allowPlane) return;
-      const plane = planes.find((p) => p.id === obj.userData.planeId);
-      if (plane && !busy) setSelectedPlaneId(plane.id);
-    } else if (obj.userData.kind === "edge") {
+    const edgeObj = pickNearestSegment(
+      clientX,
+      clientY,
+      (refGeometryGroupRef.current?.children ?? [])
+        .filter((o) => o.userData.kind === "edge")
+        .map((o): [THREE.Object3D, THREE.Vector3, THREE.Vector3] => [
+          o,
+          vecMm(o.userData.from),
+          vecMm(o.userData.to),
+        ])
+    );
+    if (edgeObj) {
       setSelectedEdge({
-        edgeId: obj.userData.edgeId,
-        sketchId: obj.userData.sketchId,
-        from: obj.userData.from,
-        to: obj.userData.to,
+        edgeId: edgeObj.userData.edgeId,
+        sketchId: edgeObj.userData.sketchId,
+        from: edgeObj.userData.from,
+        to: edgeObj.userData.to,
       });
       setSelectedPlaneId(null);
+      return;
     }
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, camera);
+    const hits = raycaster.intersectObjects(planeCardGroupRef.current?.children ?? [], false);
+    setSelectedEdge(null);
+    if (hits.length === 0) {
+      setSelectedPlaneId(null);
+      return;
+    }
+    if (!allowPlane) return;
+    const plane = planes.find((p) => p.id === hits[0].object.userData.planeId);
+    if (plane && !busy) setSelectedPlaneId(plane.id);
   }
 
   // ── 스케치 모드: 평면에 점 찍기 ─────────────────────────────────
@@ -2408,6 +2656,7 @@ export default function ProjectCanvas({
     }
   }
   function hideDrawPreview() {
+    clearErasePreview();
     hidePreviewLine();
     lastPreviewDirRef.current = null;
     clearTypedLength();
@@ -2786,46 +3035,235 @@ export default function ProjectCanvas({
   function handleDeleteSelection() {
     if (!selectedPointId && !selectedActiveEdgeId) return;
     pushUndoSnapshot();
-    const touchedPointIds = new Set<string>();
     if (selectedPointId) {
       const id = selectedPointId;
-      for (const [eid, e] of [...activeEdgesRef.current]) {
-        if (e.fromId !== id && e.toId !== id) continue;
-        touchedPointIds.add(e.fromId);
-        touchedPointIds.add(e.toId);
-        removeActiveEdgeLine(eid);
-        activeEdgesRef.current.delete(eid);
-      }
+      const edgeIds = [...activeEdgesRef.current.values()]
+        .filter((e) => e.fromId === id || e.toId === id)
+        .map((e) => e.id);
       removeActivePointMesh(id);
       activePointsRef.current.delete(id);
-      touchedPointIds.delete(id);
+      removeEdgesAndOrphans(edgeIds);
     } else if (selectedActiveEdgeId) {
       const target = activeEdgesRef.current.get(selectedActiveEdgeId);
-      if (target) {
-        const key = strokeKeyOf(target);
-        for (const [eid, e] of [...activeEdgesRef.current]) {
-          if (strokeKeyOf(e) !== key) continue;
-          touchedPointIds.add(e.fromId);
-          touchedPointIds.add(e.toId);
-          removeActiveEdgeLine(eid);
-          activeEdgesRef.current.delete(eid);
-        }
-      }
+      if (target) removeEdgesAndOrphans(strokeEdgeIds(strokeKeyOf(target)));
     }
-    for (const pid of touchedPointIds) {
-      const stillUsed = [...activeEdgesRef.current.values()].some(
-        (e) => e.fromId === pid || e.toId === pid
-      );
-      if (stillUsed) continue;
+    afterGeometryChanged();
+    selectActivePoint(null);
+  }
+
+  function strokeEdgeIds(key: string) {
+    return [...activeEdgesRef.current.values()].filter((e) => strokeKeyOf(e) === key).map((e) => e.id);
+  }
+  function removeEdgesAndOrphans(edgeIds: Iterable<string>) {
+    const touched = new Set<string>();
+    for (const eid of [...edgeIds]) {
+      const e = activeEdgesRef.current.get(eid);
+      if (!e) continue;
+      touched.add(e.fromId);
+      touched.add(e.toId);
+      removeActiveEdgeLine(eid);
+      activeEdgesRef.current.delete(eid);
+    }
+    const used = new Set<string>();
+    for (const e of activeEdgesRef.current.values()) {
+      used.add(e.fromId);
+      used.add(e.toId);
+    }
+    for (const pid of touched) {
+      if (used.has(pid)) continue;
       removeActivePointMesh(pid);
       activePointsRef.current.delete(pid);
     }
     if (lastPointIdRef.current && !activePointsRef.current.has(lastPointIdRef.current)) {
       lastPointIdRef.current = null;
     }
+  }
+  // 원을 지우면 Ø 라벨도 같이 없어져야 한다.
+  function afterGeometryChanged() {
+    rebuildShapeLabels();
     syncCounts();
     dirtyRef.current = true;
-    selectActivePoint(null);
+  }
+
+  // ── 지우개 ──────────────────────────────────────────────────────
+  // 커서 아래에서 지울 대상: 선분 id → 그 선분에서 지울 구간들.
+  // 개체 지우개는 획 전체, 조각 지우개는 교차점 사이 조각.
+  function eraseTargetAt(clientX: number, clientY: number) {
+    const edgeId = pickActiveEdge(clientX, clientY);
+    const e = edgeId ? activeEdgesRef.current.get(edgeId) : undefined;
+    if (!edgeId || !e) return null;
+    const cached = erasePreviewCacheRef.current;
+    if (tool === "eraseObj") {
+      if (cached?.has(edgeId)) return cached;
+      const removed = new Map(strokeEdgeIds(strokeKeyOf(e)).map((id): [string, [number, number][]] => [id, [[0, 1]]]));
+      erasePreviewCacheRef.current = removed;
+      return removed;
+    }
+    const raw = raycastToActivePlane(clientX, clientY);
+    const a = activePointsRef.current.get(e.fromId);
+    const b = activePointsRef.current.get(e.toId);
+    if (!raw || !a || !b || !activePlane) return null;
+    const ivs = cached?.get(edgeId);
+    if (ivs) {
+      const av = vecMm(a);
+      const ab = vecMm(b).sub(av);
+      const t = ab.lengthSq() > 1e-12 ? raw.clone().sub(av).dot(ab) / ab.lengthSq() : 0.5;
+      if (ivs.some(([t0, t1]) => t >= t0 - T_EPS && t <= t1 + T_EPS)) return cached!;
+    }
+    const removed = computeTrimPiece(
+      activePlane,
+      activePointsRef.current,
+      activeEdgesRef.current,
+      otherSnapRefs?.segs ?? [],
+      edgeId,
+      raw
+    );
+    erasePreviewCacheRef.current = removed;
+    return removed;
+  }
+
+  function showErasePreview(removed: Map<string, [number, number][]> | null) {
+    if (erasePreviewRef.current?.userData.removed === removed && removed) return;
+    clearErasePreviewLine();
+    if (!removed) return;
+    const pos: number[] = [];
+    for (const [id, ivs] of removed) {
+      const e = activeEdgesRef.current.get(id);
+      const a = e && activePointsRef.current.get(e.fromId);
+      const b = e && activePointsRef.current.get(e.toId);
+      if (!a || !b) continue;
+      const av = vecMm(a);
+      const bv = vecMm(b);
+      for (const [t0, t1] of ivs) {
+        const p = av.clone().lerp(bv, t0);
+        const q = av.clone().lerp(bv, t1);
+        pos.push(p.x, p.y, p.z, q.x, q.y, q.z);
+      }
+    }
+    if (pos.length === 0) return;
+    const geo = new LineSegmentsGeometry();
+    geo.setPositions(pos);
+    const mat = new LineMaterial({ color: ERASE_COLOR, linewidth: 4.5, resolution: lineResolutionRef.current });
+    mat.depthTest = false;
+    const obj = new LineSegments2(geo, mat);
+    obj.renderOrder = 5;
+    obj.userData.removed = removed;
+    previewGroupRef.current?.add(obj);
+    erasePreviewRef.current = obj;
+  }
+  function clearErasePreviewLine() {
+    const obj = erasePreviewRef.current;
+    if (!obj) return;
+    previewGroupRef.current?.remove(obj);
+    obj.geometry.dispose();
+    obj.material.dispose();
+    erasePreviewRef.current = null;
+  }
+  function clearErasePreview() {
+    clearErasePreviewLine();
+    erasePreviewCacheRef.current = null;
+  }
+
+  // 지울 구간을 실제로 지운다. 선분 중간이 잘리면 잘린 자리에 새 끝점을 만들고,
+  // 남은 부분이 여러 덩어리로 나뉘면 각각 따로 선택·삭제되는 별개의 획이 된다.
+  function applyErase(removed: Map<string, [number, number][]>) {
+    const edges = activeEdgesRef.current;
+    const pts = activePointsRef.current;
+    const firstId = removed.keys().next().value;
+    const first = firstId ? edges.get(firstId) : undefined;
+    if (!first) return;
+    const key = strokeKeyOf(first);
+    const strokeEdges = [...edges.values()].filter((e) => strokeKeyOf(e) === key);
+    const strokeSizes = new Map([[key, strokeEdges.length]]);
+    const straight = new Map(strokeEdges.map((e) => [e.id, isStraightEdge(e, pts, strokeSizes)]));
+
+    const newEdges: EdgeRec[] = [];
+    const cutPoints = new Map<string, string>();
+    for (const [id, ivs] of removed) {
+      const e = edges.get(id);
+      const a = e && pts.get(e.fromId);
+      const b = e && pts.get(e.toId);
+      if (!e || !a || !b) continue;
+      const av = vecMm(a);
+      const bv = vecMm(b);
+      const len = av.distanceTo(bv);
+      const isStraight = straight.get(id) ?? true;
+      const pointAt = (t: number) => {
+        if (t <= T_EPS) return e.fromId;
+        if (t >= 1 - T_EPS) return e.toId;
+        const pos = av.clone().lerp(bv, t);
+        const ck = `${sceneToMm(pos.x)},${sceneToMm(pos.y)},${sceneToMm(pos.z)}`;
+        const known = cutPoints.get(ck) ?? findNearbyActivePoint(pos, EXACT_POINT_THRESHOLD);
+        if (known) {
+          cutPoints.set(ck, known);
+          return known;
+        }
+        const pid = `tmp_${crypto.randomUUID()}`;
+        const rec: PointRec = {
+          id: pid,
+          x: sceneToMm(pos.x),
+          y: sceneToMm(pos.y),
+          z: sceneToMm(pos.z),
+          isVertex: isStraight,
+        };
+        pts.set(pid, rec);
+        if (isStraight) addActivePointMesh(pid, rec);
+        cutPoints.set(ck, pid);
+        return pid;
+      };
+      // 0.5mm보다 짧게 남는 자투리는 버린다
+      for (const [k0, k1] of keptIntervals(ivs, len > 0 ? 0.0005 / len : 1)) {
+        const f = pointAt(k0);
+        const t = pointAt(k1);
+        if (f !== t) newEdges.push({ id: `tmp_${crypto.randomUUID()}`, fromId: f, toId: t, showLabel: isStraight, strokeId: key });
+      }
+    }
+    // 새 선을 먼저 넣어둬야 그 끝점이 "안 쓰는 점"으로 지워지지 않는다
+    for (const ne of newEdges) edges.set(ne.id, ne);
+    removeEdgesAndOrphans(removed.keys());
+
+    // 남은 선들을 이어진 덩어리별로 새 획으로 나눈다. 잘린 사각형·원은 더 이상
+    // 사각형·원이 아니므로 rect:/circle: 표시를 뗀다.
+    const remaining = [...edges.values()].filter((e) => strokeKeyOf(e) === key);
+    const parent = new Map<string, string>();
+    const find = (x: string): string => {
+      const p = parent.get(x);
+      if (!p || p === x) return x;
+      const r = find(p);
+      parent.set(x, r);
+      return r;
+    };
+    for (const e of remaining) parent.set(find(e.fromId), find(e.toId));
+    const strokeOfRoot = new Map<string, string>();
+    for (const e of remaining) {
+      const root = find(e.fromId);
+      let sid = strokeOfRoot.get(root);
+      if (!sid) {
+        sid = crypto.randomUUID();
+        strokeOfRoot.set(root, sid);
+      }
+      removeActiveEdgeLine(e.id);
+      const rec: EdgeRec = { ...e, strokeId: sid, showLabel: straight.get(e.id) ?? e.showLabel };
+      edges.set(rec.id, rec);
+      addActiveEdgeLine(rec, !!rec.showLabel);
+    }
+    clearErasePreview();
+    afterGeometryChanged();
+  }
+
+  function eraseAt(g: NonNullable<typeof eraseGestureRef.current>, clientX: number, clientY: number) {
+    const removed = eraseTargetAt(clientX, clientY);
+    if (!removed) return;
+    if (!g.snapshotPushed) {
+      pushUndoSnapshot();
+      g.snapshotPushed = true;
+    }
+    applyErase(removed);
+  }
+  // 문지르는 동안 빠르게 움직여도 가는 선을 건너뛰지 않게 4px 간격으로 훑는다.
+  function eraseAlong(g: NonNullable<typeof eraseGestureRef.current>, x0: number, y0: number, x1: number, y1: number) {
+    const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 4));
+    for (let i = 1; i <= n; i++) eraseAt(g, x0 + ((x1 - x0) * i) / n, y0 + ((y1 - y0) * i) / n);
   }
 
   // OrbitControls는 터치 시작 시 제스처 종류와 무관하게 항상
@@ -2843,6 +3281,8 @@ export default function ProjectCanvas({
       draggingPointIdRef.current = null;
     }
     cancelStrokeDrag();
+    eraseGestureRef.current = null;
+    clearErasePreviewLine();
     if (strokeActiveRef.current) {
       strokeActiveRef.current = false;
       strokeRawPointsRef.current = [];
@@ -2960,6 +3400,16 @@ export default function ProjectCanvas({
         shapeStartedThisDownRef.current = false;
       }
       e.currentTarget.setPointerCapture(e.pointerId);
+    } else if (isEraseTool(tool)) {
+      eraseGestureRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        lastX: e.clientX,
+        lastY: e.clientY,
+        rubbing: false,
+        snapshotPushed: false,
+      };
+      e.currentTarget.setPointerCapture(e.pointerId);
     }
   }
 
@@ -3025,26 +3475,14 @@ export default function ProjectCanvas({
   }
 
   function pickActiveEdge(clientX: number, clientY: number): string | null {
-    const mount = mountRef.current;
-    const camera = cameraRef.current;
-    if (!mount || !camera) return null;
-    const rect = mount.getBoundingClientRect();
-    const mouse = new THREE.Vector2(
-      ((clientX - rect.left) / rect.width) * 2 - 1,
-      -((clientY - rect.top) / rect.height) * 2 + 1
-    );
-    const raycaster = new THREE.Raycaster();
-    raycaster.params.Line = { threshold: 0.08 };
-    // 굵은 선(Line2)은 기본 판정 폭이 선 두께(2.5px)뿐이라 손가락으로는
-    // 거의 못 짚는다. 앞뒤로 넉넉히 여유를 준다(px).
-    (raycaster.params as Record<string, unknown>).Line2 = { threshold: 18 };
-    raycaster.setFromCamera(mouse, camera);
-    const hits = raycaster.intersectObjects(activeEdgeGroupRef.current?.children ?? [], false);
-    if (hits.length === 0) return null;
-    return (
-      [...activeEdgeLinesRef.current.entries()].find(([, line]) => line === hits[0].object)?.[0] ??
-      null
-    );
+    const pts = activePointsRef.current;
+    const segs: [string, THREE.Vector3, THREE.Vector3][] = [];
+    for (const [id, e] of activeEdgesRef.current) {
+      const a = pts.get(e.fromId);
+      const b = pts.get(e.toId);
+      if (a && b) segs.push([id, vecMm(a), vecMm(b)]);
+    }
+    return pickNearestSegment(clientX, clientY, segs);
   }
 
   function handlePointerUp(e: React.PointerEvent) {
@@ -3063,6 +3501,15 @@ export default function ProjectCanvas({
 
     if (arrowDragRef.current) {
       arrowDragRef.current = false;
+      return;
+    }
+
+    if (eraseGestureRef.current) {
+      const g = eraseGestureRef.current;
+      eraseGestureRef.current = null;
+      // 거의 안 움직였으면 탭 — 누른 자리 하나만 지운다(오래 눌러도 마찬가지)
+      if (!g.rubbing) eraseAt(g, e.clientX, e.clientY);
+      if (e.pointerType !== "touch") showErasePreview(eraseTargetAt(e.clientX, e.clientY));
       return;
     }
 
@@ -3132,6 +3579,11 @@ export default function ProjectCanvas({
         pushUndoSnapshot();
         commitFreehandStroke(rawPoints);
       }
+      // 이어그리기가 아니면 여기서 획이 끝난 것 — commitDrawPoint가 남겨둔
+      // lastPointIdRef를 지워서 다음 마우스 이동에 고무줄 미리보기(점선)가
+      // 안 따라오게 한다(다음 pointerDown에서도 다시 지우지만, 그 사이
+      // 마우스만 움직여도 점선이 보이는 문제를 막기 위해 여기서도 지운다).
+      lastPointIdRef.current = null;
       return;
     }
 
@@ -3212,6 +3664,29 @@ export default function ProjectCanvas({
     }
 
     if (tool === "select") return;
+
+    if (isEraseTool(tool)) {
+      const g = eraseGestureRef.current;
+      if (!g) {
+        // 마우스·펜을 올려두기만 하면 지워질 선을 빨갛게 미리 보여준다
+        showErasePreview(eraseTargetAt(e.clientX, e.clientY));
+      } else if (!g.rubbing) {
+        if (Math.hypot(e.clientX - g.startX, e.clientY - g.startY) > TAP_MAX_MOVE) {
+          g.rubbing = true;
+          clearErasePreviewLine();
+          eraseAt(g, g.startX, g.startY);
+          eraseAlong(g, g.startX, g.startY, e.clientX, e.clientY);
+          g.lastX = e.clientX;
+          g.lastY = e.clientY;
+        }
+      } else {
+        eraseAlong(g, g.lastX, g.lastY, e.clientX, e.clientY);
+        g.lastX = e.clientX;
+        g.lastY = e.clientY;
+      }
+      return;
+    }
+
     const raw = raycastToActivePlane(e.clientX, e.clientY);
     if (!raw) return;
 
@@ -3246,10 +3721,10 @@ export default function ProjectCanvas({
   }
 
   function handleSetTool(next: Tool) {
-    // 선택 → 그리기 도구로 바꿀 때만 평면 정면으로 카메라를 맞춘다
+    // 선택·지우개 → 그리기 도구로 바꿀 때만 평면 정면으로 카메라를 맞춘다
     // (그리기 도구끼리 바꿀 때는 보던 화면을 유지).
     // 확대 상태와 보던 위치는 유지하고 방향만 정면으로 돌린다.
-    if (tool === "select" && next !== "select" && activePlane) {
+    if (!isDrawTool(tool) && isDrawTool(next) && activePlane) {
       snapCameraFlat(activePlane, { keepZoom: true, keepPan: true });
     }
     setTool(next);
@@ -3346,10 +3821,10 @@ export default function ProjectCanvas({
 
   const selectedPlane = planes.find((p) => p.id === selectedPlaneId) ?? null;
 
-  return (
-    <div className="fixed inset-0 bg-[#faf6ee] overflow-hidden">
-      {/* 좌측 트리 (캔버스 위에 떠 있는 패널, 레이아웃을 나누지 않음) — CATIA식 연결선 트리 */}
-      <div className="absolute top-[4.75rem] left-3 z-10 w-64 max-h-[calc(100vh-5.5rem)] flex flex-col rounded-lg border border-black/10 bg-white/90 backdrop-blur-sm shadow-lg">
+  // 좌측 트리 — 캔버스 영역 위에 떠 있는 CATIA식 연결선 트리. 도구 막대·상태줄 아래에
+  // 붙어 있어서 도구 막대가 두 줄로 늘어나도 글씨와 겹치지 않는다.
+  const treePanel = (
+      <div className="absolute top-2 left-3 z-10 w-64 max-w-[calc(100%-1.5rem)] max-h-[calc(100%-1rem)] flex flex-col rounded-lg border border-black/10 bg-white/90 backdrop-blur-sm shadow-lg">
         <div className="flex-1 overflow-y-auto px-2 py-2 text-xs text-gray-700">
           <div className="flex items-center gap-1.5 h-6 px-1 font-bold text-gray-900">
             <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" strokeWidth="1.3">
@@ -3477,8 +3952,10 @@ export default function ProjectCanvas({
           })()}
         </div>
       </div>
+  );
 
-      {/* 캔버스 영역: 트리 패널 뒤까지 화면 전체를 채운다 */}
+  return (
+    <div className="fixed inset-0 bg-[#faf6ee] overflow-hidden">
       <div className="absolute inset-0 flex flex-col">
         <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 border-b border-black/10 bg-[#faf6ee]/90 backdrop-blur-sm">
           {mode === "overview" ? (
@@ -3514,10 +3991,11 @@ export default function ProjectCanvas({
                 <button
                   onClick={handleOverviewUndo}
                   disabled={overviewUndoCount === 0}
-                  className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600 disabled:opacity-40"
-                  title="오버뷰에서 한 선 잇기/지우기를 되돌립니다 (Ctrl+Z)"
+                  className="ml-1 w-8 h-8 flex items-center justify-center rounded-md border border-gray-300 bg-white text-gray-600 hover:bg-gray-100 disabled:opacity-40"
+                  title="실행 취소 — 오버뷰에서 한 선 잇기/지우기를 되돌립니다 (Ctrl+Z)"
+                  aria-label="실행 취소"
                 >
-                  실행 취소
+                  <UndoIcon />
                 </button>
               </div>
               <button
@@ -3657,18 +4135,20 @@ export default function ProjectCanvas({
               </span>
               <div className="flex items-center gap-0.5 rounded-lg border border-gray-300 bg-white p-0.5">
                 {TOOL_DEFS.map((t) => (
-                  <button
-                    key={t.id}
-                    onClick={() => handleSetTool(t.id)}
-                    title={t.title}
-                    aria-label={t.title}
-                    aria-pressed={tool === t.id}
-                    className={`w-9 h-9 flex items-center justify-center rounded-md ${
-                      tool === t.id ? "bg-gray-900 text-white" : "text-gray-600 hover:bg-gray-100"
-                    }`}
-                  >
-                    <ToolIcon kind={t.id} />
-                  </button>
+                  <div key={t.id} className="flex items-center gap-0.5">
+                    {t.id === "eraseObj" && <span className="w-px h-6 mx-0.5 bg-gray-200" />}
+                    <button
+                      onClick={() => handleSetTool(t.id)}
+                      title={t.title}
+                      aria-label={t.title}
+                      aria-pressed={tool === t.id}
+                      className={`w-9 h-9 flex items-center justify-center rounded-md ${
+                        tool === t.id ? "bg-gray-900 text-white" : "text-gray-600 hover:bg-gray-100"
+                      }`}
+                    >
+                      <ToolIcon kind={t.id} />
+                    </button>
+                  </div>
                 ))}
               </div>
               <button
@@ -3806,9 +4286,11 @@ export default function ProjectCanvas({
               )}
               <button
                 onClick={handleUndo}
-                className="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
+                title="실행 취소 (Ctrl+Z)"
+                aria-label="실행 취소"
+                className="w-9 h-9 flex items-center justify-center rounded-md border border-gray-300 bg-white text-gray-600 hover:bg-gray-100"
               >
-                실행 취소
+                <UndoIcon />
               </button>
               <button
                 onClick={handleClearAll}
@@ -3880,6 +4362,10 @@ export default function ProjectCanvas({
               <span>
                 {tool === "select"
                   ? "점을 끌어서 이동(사각형은 모양 유지), 선을 탭하면 그 선(한 획) 전체가 선택됩니다. Delete 키로 지우기."
+                  : tool === "eraseObj"
+                  ? "선을 탭하거나 누른 채 문지르면 그 개체(한 획) 전체가 지워집니다 · 빨간색이 지워질 선"
+                  : tool === "eraseSeg"
+                  ? "선을 탭하거나 문지르면 교차점 사이 조각만 지워집니다 · 빨간색이 지워질 조각"
                   : tool === "free"
                     ? "누른 채 그으면 그대로 곡선 · 1초 멈추면 직선으로 바뀝니다 · 점·선·원점에 자석처럼 붙습니다"
                     : tool === "line"
@@ -3917,16 +4403,22 @@ export default function ProjectCanvas({
           {pendingSaves > 0 && <span className="text-amber-700">저장 중…</span>}
         </div>
 
-        <div
-          ref={mountRef}
-          className="flex-1"
-          style={{ touchAction: "none" }}
-          onPointerDown={handlePointerDown}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerCancel}
-          onPointerMove={handleCanvasMove}
-          onContextMenu={handleCanvasContextMenu}
-        />
+        <div className="relative flex-1 min-h-0">
+          <div
+            ref={mountRef}
+            className="absolute inset-0"
+            style={{ touchAction: "none", cursor: isEraseTool(tool) && mode === "sketch" ? "crosshair" : undefined }}
+            onPointerDown={handlePointerDown}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
+            onPointerMove={handleCanvasMove}
+            onPointerLeave={() => {
+              if (!eraseGestureRef.current) clearErasePreviewLine();
+            }}
+            onContextMenu={handleCanvasContextMenu}
+          />
+          {treePanel}
+        </div>
       </div>
     </div>
   );
