@@ -58,6 +58,7 @@ const PENCIL_DIM = 0xcfc7b8; // 평면 카드·그리드 등 "구성선"용 (연
 const REF_EDGE = 0x9c9178; // 저장된 스케치의 실제 선/점 (구성선보다 진하게, 구분되도록)
 const PLANE_CARD = 0x9a9284;
 const PLANE_CARD_ACTIVE = 0x4b4b4b;
+const PLANE_CARD_EDGE = 0x6f6759; // 평면 카드 테두리(면보다 조금 진하게)
 const SELECT_COLOR = 0xc2410c; // 선택된 선/끝점 강조색 (주황)
 const ERASE_COLOR = 0xdc2626; // 지우개가 지울 선 미리보기 (빨강)
 const EDGE_WIDTH_PX = 2.5; // 손그림 느낌을 위한 선 두께(화면 픽셀)
@@ -1324,6 +1325,10 @@ export default function ProjectCanvas({
 
     while (cardGroup.children.length) {
       const m = cardGroup.children.pop() as THREE.Mesh;
+      for (const child of m.children as THREE.LineLoop[]) {
+        child.geometry.dispose();
+        (child.material as THREE.Material).dispose();
+      }
       m.geometry.dispose();
       (m.material as THREE.Material).dispose();
     }
@@ -1345,6 +1350,23 @@ export default function ProjectCanvas({
           side: THREE.DoubleSide,
         });
         const mesh = new THREE.Mesh(geo, mat);
+        // 카드 가장자리가 잘 보이게 면보다 조금 진한 테두리
+        const h = CARD_SIZE / 2;
+        mesh.add(
+          new THREE.LineLoop(
+            new THREE.BufferGeometry().setFromPoints([
+              new THREE.Vector3(-h, -h, 0),
+              new THREE.Vector3(h, -h, 0),
+              new THREE.Vector3(h, h, 0),
+              new THREE.Vector3(-h, h, 0),
+            ]),
+            new THREE.LineBasicMaterial({
+              color: isSelected ? PLANE_CARD_ACTIVE : PLANE_CARD_EDGE,
+              transparent: true,
+              opacity: isSelected ? 0.75 : 0.55,
+            })
+          )
+        );
         const { origin } = planeBasis(plane);
         mesh.position.copy(origin);
         mesh.quaternion.copy(planeQuaternion(plane));
