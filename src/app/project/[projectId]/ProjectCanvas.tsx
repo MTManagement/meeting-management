@@ -692,6 +692,164 @@ function keptIntervals(removed: [number, number][], minLen: number): [number, nu
   return kept;
 }
 
+// ── 자유 그리기 보정 (1~5단계) ──────────────────────────────────────
+// ① 떨림 보정: 궤적을 일정 간격으로 다시 찍은 뒤 이웃 점들과 평균 내서 잔떨림을 없앤다
+// ② 직선 보정: 거의 곧게 간 긴 구간은 직선으로 편다(꺾인 모서리와 둥근 곡선은 살림)
+// 세기는 화면 픽셀 기준(pxScene = 화면 1px의 scene 길이)이라 확대/축소와 상관없이 느낌이 같다.
+const SMOOTH_LEVELS = [1, 2, 3, 4, 5] as const;
+type SmoothLevel = (typeof SMOOTH_LEVELS)[number];
+// radius: 평균 내는 이웃 점 수(간격 2px), epsPx: 이만큼 이내로 휜 구간은 곧다고 봄,
+// minStraightPx: 이보다 긴 곧은 구간만 직선으로 편다. 반지름 r인 곡선은 minStraight²/(8·eps)보다
+// 크면 펴지므로(1단계 ≈1000px, 5단계 ≈120px) 작은 원·둥근 모서리는 어느 단계에서도 둥글게 남는다.
+const SMOOTH_PARAMS: Record<SmoothLevel, { radius: number; epsPx: number; minStraightPx: number }> = {
+  1: { radius: 2, epsPx: 0.8, minStraightPx: 80 },
+  2: { radius: 3, epsPx: 1.5, minStraightPx: 78 },
+  3: { radius: 5, epsPx: 2.5, minStraightPx: 75 },
+  4: { radius: 7, epsPx: 3.5, minStraightPx: 72 },
+  5: { radius: 10, epsPx: 5, minStraightPx: 70 },
+};
+const SMOOTH_STEP_PX = 2; // 다시 찍는 간격(화면 픽셀)
+const SMOOTH_STORAGE_KEY = "papersketch.smoothLevel";
+
+function readSmoothLevel(): SmoothLevel {
+  try {
+    const v = Number(window.localStorage.getItem(SMOOTH_STORAGE_KEY));
+    if (SMOOTH_LEVELS.includes(v as SmoothLevel)) return v as SmoothLevel;
+  } catch {
+    // 저장소를 못 쓰는 환경(사생활 보호 모드 등)이면 기본값
+  }
+  return 3;
+}
+
+function resamplePath(pts: THREE.Vector3[], step: number) {
+  const out = [pts[0].clone()];
+  let carry = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const seg = a.distanceTo(b);
+    if (seg < 1e-12) continue;
+    let t = step - carry;
+    while (t <= seg) {
+      out.push(a.clone().lerp(b, t / seg));
+      t += step;
+    }
+    carry = seg - (t - step);
+  }
+  const last = pts[pts.length - 1];
+  if (out[out.length - 1].distanceTo(last) > 1e-9) out.push(last.clone());
+  return out;
+}
+
+// 양끝은 그대로 두고(끝점 자석 스냅·도형 닫기가 정확하도록) 안쪽만 삼각 가중 평균
+function smoothPath(pts: THREE.Vector3[], radius: number) {
+  const n = pts.length;
+  return pts.map((p, i) => {
+    const r = Math.min(radius, i, n - 1 - i);
+    if (r === 0) return p.clone();
+    const acc = new THREE.Vector3();
+    let wsum = 0;
+    for (let j = i - r; j <= i + r; j++) {
+      const w = r + 1 - Math.abs(j - i);
+      acc.addScaledVector(pts[j], w);
+      wsum += w;
+    }
+    return acc.multiplyScalar(1 / wsum);
+  });
+}
+
+// Ramer–Douglas–Peucker: 곧은 구간의 양끝(꺾이는 점)만 남긴 인덱스들
+function rdpAnchors(pts: THREE.Vector3[], eps: number) {
+  const keep = new Array<boolean>(pts.length).fill(false);
+  keep[0] = keep[pts.length - 1] = true;
+  const stack: [number, number][] = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [s, e] = stack.pop()!;
+    let maxD = 0;
+    let idx = -1;
+    for (let i = s + 1; i < e; i++) {
+      const d = pts[i].distanceTo(closestPointOnSegment(pts[i], pts[s], pts[e]));
+      if (d > maxD) {
+        maxD = d;
+        idx = i;
+      }
+    }
+    if (idx >= 0 && maxD > eps) {
+      keep[idx] = true;
+      stack.push([s, idx], [idx, e]);
+    }
+  }
+  return keep.flatMap((k, i) => (k ? [i] : []));
+}
+
+function stabilizeStroke(raw: THREE.Vector3[], level: SmoothLevel, pxScene: number) {
+  if (raw.length < 3 || !(pxScene > 0)) return raw;
+  const p = SMOOTH_PARAMS[level];
+  const even = resamplePath(raw, SMOOTH_STEP_PX * pxScene);
+  if (even.length < 3) return raw;
+  const smooth = smoothPath(even, p.radius);
+  const anchors = rdpAnchors(smooth, p.epsPx * pxScene);
+  const minStraight = p.minStraightPx * pxScene;
+  const segs = anchors.slice(1).map((e, k) => {
+    const s = anchors[k];
+    return { s, e, straight: smooth[s].distanceTo(smooth[e]) >= minStraight };
+  });
+  // 평균을 내면 꺾인 모서리가 둥글게 깎이므로, 곧은 구간 둘이 만나는 곳은
+  // 각 구간의 가운데 부분으로 맞춘 직선을 연장해서 만나는 점으로 모서리를 되살린다.
+  const fit = (s: number, e: number): [THREE.Vector3, THREE.Vector3] => [
+    smooth[s + Math.floor((e - s) * 0.2)],
+    smooth[s + Math.ceil((e - s) * 0.8)],
+  ];
+  const cornerLimit = (p.radius * SMOOTH_STEP_PX * 2 + p.epsPx) * pxScene;
+  const segLen = (k: number) => smooth[segs[k].s].distanceTo(smooth[segs[k].e]);
+  const out: THREE.Vector3[] = [smooth[0]];
+  for (let k = 0; k < segs.length; k++) {
+    const seg = segs[k];
+    // 충분히 길고 거의 곧은 구간 → 직선 하나로. 짧은 구간(둥근 곡선·잔모서리)은 부드러운 그대로
+    if (!seg.straight) {
+      for (let i = seg.s + 1; i <= seg.e; i++) out.push(smooth[i]);
+      continue;
+    }
+    // 다음 곧은 구간 사이에 둥글게 깎인 짧은 조각만 있으면 그 조각은 건너뛰고 모서리로 만든다
+    let j = k + 1;
+    while (j < segs.length && !segs[j].straight && segLen(j) <= cornerLimit) j++;
+    const next = segs[j];
+    if (next?.straight) {
+      const [a1, b1] = fit(seg.s, seg.e);
+      const [a2, b2] = fit(next.s, next.e);
+      const corner = lineIntersection(a1, b1, a2, b2);
+      if (
+        corner &&
+        corner.distanceTo(smooth[seg.e]) <= cornerLimit &&
+        corner.distanceTo(smooth[next.s]) <= cornerLimit
+      ) {
+        out.push(corner);
+        k = j - 1;
+        continue;
+      }
+    }
+    out.push(smooth[seg.e]);
+  }
+  return out;
+}
+
+// 같은 평면 위 두 직선(각각 두 점으로 정의)이 만나는 점. 거의 평행하면 null
+function lineIntersection(a1: THREE.Vector3, b1: THREE.Vector3, a2: THREE.Vector3, b2: THREE.Vector3) {
+  const d1 = b1.clone().sub(a1);
+  const d2 = b2.clone().sub(a2);
+  const r = a1.clone().sub(a2);
+  const a = d1.dot(d1);
+  const e = d2.dot(d2);
+  const b = d1.dot(d2);
+  const c = d1.dot(r);
+  const f = d2.dot(r);
+  const den = a * e - b * b;
+  if (den <= 1e-9 * a * e) return null;
+  const s = (b * f - c * e) / den;
+  const t = (a * f - b * c) / den;
+  return a1.clone().addScaledVector(d1, s).add(a2.clone().addScaledVector(d2, t)).multiplyScalar(0.5);
+}
+
 function ToolIcon({ kind }: { kind: Tool }) {
   const common = {
     viewBox: "0 0 20 20",
@@ -1000,6 +1158,19 @@ export default function ProjectCanvas({
   // 직선 도구에서 "이어그리기"를 켜면 탭으로 점을 찍어서 잇는다(오토캐드식).
   // 끄면 누른 채 끌어서 시작~끝 직선을 하나씩 긋는다.
   const [chainMode, setChainMode] = useState(false);
+  // 자유 그리기 보정 세기(1~5). 기기마다 마지막에 고른 값을 기억한다.
+  // 이 설정은 스케치 안 자유 그리기에서만 보이므로 서버 렌더와 달라도 화면이 어긋나지 않는다.
+  const [smoothLevel, setSmoothLevel] = useState<SmoothLevel>(() =>
+    typeof window === "undefined" ? 3 : readSmoothLevel()
+  );
+  function changeSmoothLevel(level: SmoothLevel) {
+    setSmoothLevel(level);
+    try {
+      window.localStorage.setItem(SMOOTH_STORAGE_KEY, String(level));
+    } catch {
+      // 저장을 못 해도 이번 접속 동안은 적용된다
+    }
+  }
 
   // 사각형·원 도구: 첫 점(꼭짓점/중심)을 찍은 뒤 두 번째 점을 기다리는 상태.
   // 탭-탭(첫 점 탭, 대각선 점 탭)과 누른 채 끌기 둘 다 된다.
@@ -2796,13 +2967,16 @@ export default function ProjectCanvas({
 
   // 화면 픽셀 거리를 이 위치에서의 scene 거리로 바꾼다(확대할수록 작아짐).
   function snapThresholdScene(at: THREE.Vector3) {
+    const px = lastPointerTypeRef.current === "touch" ? SNAP_PX_TOUCH : SNAP_PX_MOUSE;
+    return px * scenePerPx(at);
+  }
+  // 이 위치에서 화면 1픽셀이 scene 단위로 얼마인지
+  function scenePerPx(at: THREE.Vector3) {
     const camera = cameraRef.current;
     const mount = mountRef.current;
-    if (!camera || !mount) return 0.05;
+    if (!camera || !mount) return 0.05 / SNAP_PX_MOUSE;
     const d = camera.position.distanceTo(at);
-    const perPx = (2 * d * Math.tan((camera.fov * Math.PI) / 360)) / Math.max(1, mount.clientHeight);
-    const px = lastPointerTypeRef.current === "touch" ? SNAP_PX_TOUCH : SNAP_PX_MOUSE;
-    return px * perPx;
+    return (2 * d * Math.tan((camera.fov * Math.PI) / 360)) / Math.max(1, mount.clientHeight);
   }
 
   function findNearbyActivePoint(
@@ -3178,7 +3352,8 @@ export default function ProjectCanvas({
   function updateFreehandPreview() {
     const pts = strokeRawPointsRef.current;
     if (pts.length < 2) return;
-    let renderPts = pts;
+    // 그리는 중에도 보정된 선을 보여줘서, 펜을 뗄 때 모양이 갑자기 바뀌지 않게 한다
+    let renderPts = tool === "free" ? stabilizeStroke(pts, smoothLevel, scenePerPx(pts[0])) : pts;
     if (strokeStraightModeRef.current) {
       const start = resolveTarget(pts[0]).pos;
       const end = resolveTarget(pts[pts.length - 1], { ortho: true, orthoRef: start }).pos;
@@ -4318,9 +4493,9 @@ export default function ProjectCanvas({
         commitDrawPointFromRaw(rawPoints[0], false, true, true);
         commitDrawPointFromRaw(rawPoints[rawPoints.length - 1], true, true, true);
       } else {
-        // 자유곡선 그대로(삐뚤빼뚤 유지) → 궤적을 따라 여러 점으로 커밋
+        // 자유곡선 → 보정 단계만큼 떨림을 정리하고 곧은 구간을 편 뒤 여러 점으로 커밋
         pushUndoSnapshot();
-        commitFreehandStroke(rawPoints);
+        commitFreehandStroke(stabilizeStroke(rawPoints, smoothLevel, scenePerPx(rawPoints[0])));
       }
       // 이어그리기가 아니면 여기서 획이 끝난 것 — commitDrawPoint가 남겨둔
       // lastPointIdRef를 지워서 다음 마우스 이동에 고무줄 미리보기(점선)가
@@ -4931,6 +5106,30 @@ export default function ProjectCanvas({
                 정면 뷰
               </button>
 
+              {tool === "free" && (
+                <div
+                  className="flex items-center gap-1.5 text-xs text-gray-500 px-1"
+                  title="손떨림을 정리하고 거의 곧은 부분은 직선으로 폅니다 (1 약하게 ~ 5 강하게)"
+                >
+                  보정
+                  <div className="flex rounded-md border border-gray-300 bg-white overflow-hidden">
+                    {SMOOTH_LEVELS.map((n) => (
+                      <button
+                        key={n}
+                        onClick={() => changeSmoothLevel(n)}
+                        aria-pressed={smoothLevel === n}
+                        aria-label={`보정 ${n}단계`}
+                        className={`w-8 h-8 text-xs ${
+                          smoothLevel === n ? "bg-gray-900 text-white" : "text-gray-600 hover:bg-gray-100"
+                        }`}
+                      >
+                        {n}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {tool === "line" && (
                 <label
                   className="flex items-center gap-1 text-xs text-gray-500 px-1"
@@ -5147,7 +5346,7 @@ export default function ProjectCanvas({
                   : tool === "project"
                   ? "다른 스케치나 3D 연결선의 선을 탭하면 이 평면에 수직으로 투영해서 복사합니다(원본과 독립)"
                   : tool === "free"
-                    ? "누른 채 그으면 그대로 곡선 · 1초 멈추면 직선으로 바뀝니다 · 점·선·원점에 자석처럼 붙습니다"
+                    ? `누른 채 그으면 곡선(보정 ${smoothLevel}단계: 떨림 정리·곧은 부분은 직선으로) · 1초 멈추면 직선으로 바뀝니다 · 점·선·원점에 자석처럼 붙습니다`
                     : tool === "line"
                       ? chainMode
                         ? "탭으로 점을 찍어 잇기 · 숫자 입력 후 Enter로 정확한 길이 · Esc로 끊기"
