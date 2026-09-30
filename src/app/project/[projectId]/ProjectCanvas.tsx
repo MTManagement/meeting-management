@@ -68,11 +68,35 @@ const GRID_SIZE = 10; // scene 단위 (=10m)
 const BASE_GRID_WIDTH_MM = 5000; // XY 평면에 항상 깔아두는 모눈종이 크기 (가로, X)
 const BASE_GRID_DEPTH_MM = 5000; // 모눈종이 크기 (세로, Y)
 const BASE_GRID_SPACING_MM = 100; // 모눈 한 칸 크기
-const FLAT_DISTANCE = 2.5; // 스케치 정면 뷰 카메라 거리 (scene 단위)
+// 카메라: 오버뷰는 원근(화각을 줄여 왜곡을 약하게), 스케치는 원근 없는 평행 투영(CAD 스케치처럼 —
+// 다른 높이의 평면에 있는 같은 크기 도형이 같은 크기로 보인다). 둘을 오갈 때는 "보이는 높이"를 맞춘다.
+const OVERVIEW_FOV = 35; // 예전 50° → 원근감을 살짝 줄임
+const ORTHO_CAMERA_DIST = 50; // 평행 투영 카메라를 대상에서 떨어뜨려 두는 거리(크기와 무관, 잘림 방지용)
+const FLAT_VIEW_HEIGHT = 2 * 2.5 * Math.tan((25 * Math.PI) / 180); // 스케치 정면 뷰 기본으로 보이는 높이(예전과 같게)
+const INITIAL_VIEW_DIR = new THREE.Vector3(1.9, 2.5, 1.6).normalize(); // 오버뷰 처음 방향
+const INITIAL_VIEW_HEIGHT = 2 * Math.hypot(1.9, 2.5, 1.6) * Math.tan((25 * Math.PI) / 180); // 처음 보이는 높이(예전과 같게)
 
 // 모든 좌표·오프셋 값의 단위는 mm. Three.js 씬 내부는 보기 좋은 스케일을 위해
 // 1 scene 단위 = 1000mm(=1m)로 렌더링만 축소해서 그린다.
 const MM_PER_SCENE_UNIT = 1000;
+type ViewCamera = THREE.PerspectiveCamera | THREE.OrthographicCamera;
+// target 위치에서 화면 세로로 보이는 높이(scene 단위) — 확대/축소 정도
+function viewHeightAt(camera: ViewCamera, at: THREE.Vector3) {
+  if (camera instanceof THREE.OrthographicCamera) return (camera.top - camera.bottom) / camera.zoom;
+  return 2 * camera.position.distanceTo(at) * Math.tan((camera.fov * Math.PI) / 360);
+}
+// target을 dir 방향(대상 → 카메라)에서, 세로로 h만큼 보이게 카메라를 놓는다
+function placeCamera(camera: ViewCamera, target: THREE.Vector3, dir: THREE.Vector3, h: number) {
+  if (camera instanceof THREE.OrthographicCamera) {
+    camera.position.copy(target).addScaledVector(dir, ORTHO_CAMERA_DIST);
+    camera.zoom = (camera.top - camera.bottom) / h;
+  } else {
+    camera.position.copy(target).addScaledVector(dir, h / (2 * Math.tan((camera.fov * Math.PI) / 360)));
+  }
+  camera.updateProjectionMatrix();
+  camera.lookAt(target);
+}
+
 function mmToScene(mm: number) {
   return mm / MM_PER_SCENE_UNIT;
 }
@@ -1048,7 +1072,10 @@ export default function ProjectCanvas({
   const mountRef = useRef<HTMLDivElement>(null);
 
   const sceneRef = useRef<THREE.Scene | null>(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  // 지금 화면을 그리는 카메라(오버뷰 = perspCameraRef, 스케치 = orthoCameraRef)
+  const cameraRef = useRef<ViewCamera | null>(null);
+  const perspCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const orthoCameraRef = useRef<THREE.OrthographicCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const labelRendererRef = useRef<CSS2DRenderer | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
@@ -1318,15 +1345,16 @@ export default function ProjectCanvas({
     scene.background = new THREE.Color(PAPER_BG);
     sceneRef.current = scene;
 
-    const camera = new THREE.PerspectiveCamera(
-      50,
-      mount.clientWidth / mount.clientHeight,
-      0.1,
-      1000
-    );
-    camera.position.set(1.9, 2.5, 1.6);
+    const aspect = mount.clientWidth / mount.clientHeight;
+    const camera = new THREE.PerspectiveCamera(OVERVIEW_FOV, aspect, 0.1, 1000);
     camera.up.set(0, 0, 1); // Z축을 상하(수직) 방향으로 사용
+    placeCamera(camera, new THREE.Vector3(), INITIAL_VIEW_DIR, INITIAL_VIEW_HEIGHT);
     cameraRef.current = camera;
+    perspCameraRef.current = camera;
+    // 스케치용 평행 투영 카메라: 세로 1 단위 틀을 zoom으로 키우고 줄인다
+    const orthoCamera = new THREE.OrthographicCamera(-aspect / 2, aspect / 2, 0.5, -0.5, 0.1, 1000);
+    orthoCamera.up.set(0, 0, 1);
+    orthoCameraRef.current = orthoCamera;
     lineResolutionRef.current.set(mount.clientWidth, mount.clientHeight);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -1444,16 +1472,21 @@ export default function ProjectCanvas({
     let raf = 0;
     const animate = () => {
       controls.update();
-      renderer.render(scene, camera);
-      labelRenderer.render(scene, camera);
+      const cam = cameraRef.current ?? camera; // 오버뷰/스케치에 따라 바뀐다
+      renderer.render(scene, cam);
+      labelRenderer.render(scene, cam);
       raf = requestAnimationFrame(animate);
     };
     animate();
 
     const onResize = () => {
       if (!mount || mount.clientWidth === 0 || mount.clientHeight === 0) return;
-      camera.aspect = mount.clientWidth / mount.clientHeight;
+      const a = mount.clientWidth / mount.clientHeight;
+      camera.aspect = a;
       camera.updateProjectionMatrix();
+      orthoCamera.left = -a / 2;
+      orthoCamera.right = a / 2;
+      orthoCamera.updateProjectionMatrix();
       renderer.setSize(mount.clientWidth, mount.clientHeight);
       labelRenderer.setSize(mount.clientWidth, mount.clientHeight);
       lineResolutionRef.current.set(mount.clientWidth, mount.clientHeight);
@@ -1469,8 +1502,9 @@ export default function ProjectCanvas({
         }
       }
       // setSize가 캔버스를 비우므로 다음 프레임까지 빈 화면이 보이지 않게 바로 다시 그린다
-      renderer.render(scene, camera);
-      labelRenderer.render(scene, camera);
+      const cam = cameraRef.current ?? camera;
+      renderer.render(scene, cam);
+      labelRenderer.render(scene, cam);
     };
     // 창 크기뿐 아니라 도구 막대가 두 줄로 늘어나 캔버스 높이가 바뀔 때도 맞춘다
     // (안 맞추면 화면이 늘어져 보이고 탭 위치와 선택 위치가 어긋난다).
@@ -2189,20 +2223,33 @@ export default function ProjectCanvas({
   // OrbitControls의 내부 회전 계산 기준이 어긋나서 두 손가락 회전이
   // 이상하게 멈추거나 꼬이는 문제가 생긴다. camera.up은 항상 월드 Z로
   // 고정해두고, 위치·바라보는 방향만 평면에 맞춘다.
-  // keepZoom: 지금 확대/축소 거리 유지. keepPan: 지금 보고 있는 위치(평면 위로 내린 점)를 유지.
+  // keepZoom: 지금 확대/축소 정도 유지. keepPan: 지금 보고 있는 위치(평면 위로 내린 점)를 유지.
   function snapCameraFlat(plane: PlaneData, opts: { keepZoom?: boolean; keepPan?: boolean } = {}) {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     if (!camera || !controls) return;
     const { origin, normal } = planeBasis(plane);
-    const dist = opts.keepZoom ? camera.position.distanceTo(controls.target) : FLAT_DISTANCE;
+    const h = opts.keepZoom ? viewHeightAt(camera, controls.target) : FLAT_VIEW_HEIGHT;
     const target = opts.keepPan
       ? controls.target.clone().sub(normal.clone().multiplyScalar(normal.dot(controls.target.clone().sub(origin))))
       : origin.clone();
-    camera.position.copy(target.clone().add(normal.clone().multiplyScalar(dist)));
     camera.up.set(0, 0, 1);
+    placeCamera(camera, target, normal, h);
     controls.target.copy(target);
-    camera.lookAt(target);
+    controls.update();
+  }
+
+  // 오버뷰(원근) ↔ 스케치(평행 투영) 카메라 바꾸기. 보던 방향·위치·확대 정도는 그대로 이어받는다.
+  function switchCamera(kind: "persp" | "ortho") {
+    const cur = cameraRef.current;
+    const controls = controlsRef.current;
+    const next = kind === "ortho" ? orthoCameraRef.current : perspCameraRef.current;
+    if (!cur || !controls || !next || cur === next) return;
+    const target = controls.target.clone();
+    const dir = cur.position.clone().sub(target).normalize();
+    placeCamera(next, target, dir, viewHeightAt(cur, target));
+    controls.object = next;
+    cameraRef.current = next;
     controls.update();
   }
 
@@ -2216,11 +2263,10 @@ export default function ProjectCanvas({
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     if (!camera || !controls) return;
-    const dist = camera.position.distanceTo(controls.target);
+    const h = viewHeightAt(camera, controls.target);
     controls.target.set(0, 0, 0);
-    camera.position.copy(new THREE.Vector3(1.9, 2.5, 1.6).normalize().multiplyScalar(dist));
     camera.up.set(0, 0, 1);
-    camera.lookAt(controls.target);
+    placeCamera(camera, controls.target, INITIAL_VIEW_DIR, h);
     controls.update();
   }
 
@@ -2311,6 +2357,7 @@ export default function ProjectCanvas({
     setPendingPerpEdge(null);
     setSelectedPointId(null);
     setSelectedActiveEdgeId(null);
+    switchCamera("ortho"); // 스케치는 원근 없는 평행 투영
     snapCameraFlat(plane, { keepZoom: true }); // 확대/축소 상태는 유지
   }
 
@@ -2338,6 +2385,7 @@ export default function ProjectCanvas({
     setActivePlaneId(null);
     setActiveSketchId(null);
     setMode("overview");
+    switchCamera("persp");
   }
 
   function togglePlaneCollapsed(planeId: string) {
@@ -2371,6 +2419,7 @@ export default function ProjectCanvas({
         setActivePlaneId(null);
         setActiveSketchId(null);
         setMode("overview");
+        switchCamera("persp");
       }
       router.refresh();
     } finally {
@@ -2975,8 +3024,7 @@ export default function ProjectCanvas({
     const camera = cameraRef.current;
     const mount = mountRef.current;
     if (!camera || !mount) return 0.05 / SNAP_PX_MOUSE;
-    const d = camera.position.distanceTo(at);
-    return (2 * d * Math.tan((camera.fov * Math.PI) / 360)) / Math.max(1, mount.clientHeight);
+    return viewHeightAt(camera, at) / Math.max(1, mount.clientHeight);
   }
 
   function findNearbyActivePoint(
@@ -4216,9 +4264,7 @@ export default function ProjectCanvas({
     const mount = mountRef.current;
     if (!camera || !controls || !mount) return;
 
-    const offset = camera.position.clone().sub(controls.target);
-    const targetDistance = offset.length() * Math.tan((camera.fov / 2) * (Math.PI / 180));
-    const factor = (2 * targetDistance) / mount.clientHeight;
+    const factor = viewHeightAt(camera, controls.target) / mount.clientHeight;
 
     const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
     const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
