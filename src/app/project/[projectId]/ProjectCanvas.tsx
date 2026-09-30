@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -739,6 +739,37 @@ const SMOOTH_PARAMS: Record<SmoothLevel, { radius: number; epsPx: number; minStr
 };
 const SMOOTH_STEP_PX = 2; // 다시 찍는 간격(화면 픽셀)
 const SMOOTH_STORAGE_KEY = "papersketch.smoothLevel";
+const TREE_OPEN_STORAGE_KEY = "papersketch.treeOpen";
+
+// 트리 패널 접힘 상태(기기별 기억). useSyncExternalStore로 읽어서 서버 렌더(펼침)와 어긋나지 않게 한다.
+// 저장소를 못 쓰는 환경에서도 이번 접속 동안은 바뀌도록 메모리에도 둔다.
+let treeOpenMemory: boolean | null = null;
+const treeOpenListeners = new Set<() => void>();
+function subscribeTreeOpen(cb: () => void) {
+  treeOpenListeners.add(cb);
+  return () => {
+    treeOpenListeners.delete(cb);
+  };
+}
+function getTreeOpen() {
+  if (treeOpenMemory !== null) return treeOpenMemory;
+  try {
+    const saved = window.localStorage.getItem(TREE_OPEN_STORAGE_KEY);
+    if (saved !== null) return saved === "1";
+  } catch {
+    // 저장소를 못 쓰면 화면 폭 기준
+  }
+  return window.innerWidth >= 640;
+}
+function setTreeOpenStored(open: boolean) {
+  treeOpenMemory = open;
+  try {
+    window.localStorage.setItem(TREE_OPEN_STORAGE_KEY, open ? "1" : "0");
+  } catch {
+    // 저장을 못 해도 메모리 값으로 이번 접속 동안은 적용된다
+  }
+  for (const cb of treeOpenListeners) cb();
+}
 
 function readSmoothLevel(): SmoothLevel {
   try {
@@ -2235,9 +2266,15 @@ export default function ProjectCanvas({
     if (!camera || !controls) return;
     const { origin, normal } = planeBasis(plane);
     const h = opts.keepZoom ? viewHeightAt(camera, controls.target) : FLAT_VIEW_HEIGHT;
-    const target = opts.keepPan
-      ? controls.target.clone().sub(normal.clone().multiplyScalar(normal.dot(controls.target.clone().sub(origin))))
-      : origin.clone();
+    let target = origin.clone();
+    if (opts.keepPan) {
+      // 지금 화면 한가운데에 보이는 평면 위 지점을 그대로 가운데에 둔다(이동·살짝 회전한 상태에서도).
+      // 시선이 평면과 나란해서 안 만나면 바라보던 점을 평면에 수직으로 내린다.
+      const look = controls.target.clone().sub(camera.position).normalize();
+      target =
+        new THREE.Ray(camera.position.clone(), look).intersectPlane(toThreePlane(plane), new THREE.Vector3()) ??
+        controls.target.clone().sub(normal.clone().multiplyScalar(normal.dot(controls.target.clone().sub(origin))));
+    }
     camera.up.set(0, 0, 1);
     placeCamera(camera, target, normal, h);
     controls.target.copy(target);
@@ -2258,11 +2295,11 @@ export default function ProjectCanvas({
     controls.update();
   }
 
-  // 뷰 버튼: 스케치 안에서는 처음 정면 뷰로, 오버뷰에서는 처음 비스듬한 뷰로
-  // 돌아간다. 확대/축소 상태는 그대로 유지한다.
+  // 뷰 버튼. 스케치: 확대 정도와 보던 위치는 그대로, 방향만 평면 정면으로 바로잡는다.
+  // 오버뷰: 처음 비스듬한 방향·원점 중심으로 돌아간다(확대 정도는 유지).
   function resetView() {
     if (mode === "sketch" && activePlane) {
-      snapCameraFlat(activePlane, { keepZoom: true });
+      snapCameraFlat(activePlane, { keepZoom: true, keepPan: true });
       return;
     }
     const camera = cameraRef.current;
@@ -4813,20 +4850,42 @@ export default function ProjectCanvas({
     return () => ro.disconnect();
   }, []);
 
+  // 트리 패널 접기/펼치기. 기기마다 마지막 상태를 기억하고, 처음이면 좁은 화면(폰)에서는 접어서 시작.
+  const treeOpen = useSyncExternalStore(subscribeTreeOpen, getTreeOpen, () => true);
+  function toggleTree() {
+    setTreeOpenStored(!treeOpen);
+  }
+
   // 좌측 트리 — 캔버스 위에 떠 있는 CATIA식 연결선 트리
   const treePanel = (
       <div
-        className="absolute left-3 z-10 w-64 max-w-[calc(100%-1.5rem)] flex flex-col rounded-lg border border-black/10 bg-white/90 backdrop-blur-sm shadow-lg"
+        className={`absolute left-3 z-10 ${treeOpen ? "w-64" : "w-auto"} max-w-[calc(100%-1.5rem)] flex flex-col rounded-lg border border-black/10 bg-white/90 backdrop-blur-sm shadow-lg`}
         style={{ top: headerHeight + 8, maxHeight: `calc(100% - ${headerHeight + 16}px)` }}
       >
         <div className="flex-1 overflow-y-auto px-2 py-2 text-xs text-gray-700">
-          <div className="flex items-center gap-1.5 h-6 px-1 font-bold text-gray-900">
-            <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" strokeWidth="1.3">
+          <button
+            onClick={toggleTree}
+            aria-expanded={treeOpen}
+            title={treeOpen ? "트리 접기" : "트리 펼치기"}
+            className="w-full flex items-center gap-1.5 h-6 px-1 font-bold text-gray-900 rounded hover:bg-black/5"
+          >
+            <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 shrink-0 text-gray-500" fill="none" stroke="currentColor" strokeWidth="1.3">
               <path d="M2 4h5l1.5 1.5H14v7.5H2z" />
             </svg>
-            <span className="truncate">{projectName}</span>
-          </div>
-          {(() => {
+            <span className="flex-1 truncate text-left">{projectName}</span>
+            <svg
+              viewBox="0 0 16 16"
+              className={`w-3.5 h-3.5 shrink-0 text-gray-400 transition-transform ${treeOpen ? "" : "-rotate-90"}`}
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M4 6l4 4 4-4" />
+            </svg>
+          </button>
+          {treeOpen && (() => {
             const rootChildCount = planes.length + (freeSketch ? 1 : 0);
             return (
               <>
@@ -5153,7 +5212,7 @@ export default function ProjectCanvas({
               <button
                 onClick={resetView}
                 className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
-                title="스케치를 처음 정면 뷰로 되돌립니다 (확대/축소 상태는 유지)"
+                title="보던 위치와 확대 정도는 그대로 두고, 방향만 평면 정면으로 바로잡습니다"
               >
                 <svg viewBox="0 0 20 20" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M3 7 V3 H7 M13 3 H17 V7 M17 13 V17 H13 M7 17 H3 V13" />
