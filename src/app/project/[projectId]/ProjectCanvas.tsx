@@ -347,8 +347,13 @@ const TOOL_DEFS: { id: Tool; key: string; title: string }[] = [
   { id: "dimCircle", key: "o", title: "원 치수 (O) — 원을 탭하면 지름(Ø), 다시 탭하면 반지름(R)" },
   { id: "project", key: "j", title: "투영 복사 (J) — 다른 스케치·3D 연결선의 선을 탭하면 이 평면에 투영해서 복사" },
 ];
-// 도구 막대에서 이 도구들 앞에 구분선을 넣는다
+// 도구 막대에서 이 도구부터 새 묶음(그리기 | 지우개 | 치수 | 투영)
 const TOOL_GROUP_STARTS: Tool[] = ["eraseObj", "dimLength", "project"];
+const TOOL_GROUPS = TOOL_DEFS.reduce<(typeof TOOL_DEFS)[]>((groups, t) => {
+  if (groups.length === 0 || TOOL_GROUP_STARTS.includes(t.id)) groups.push([]);
+  groups[groups.length - 1].push(t);
+  return groups;
+}, []);
 const isDrawTool = (t: Tool) => t === "free" || t === "line" || t === "rect" || t === "circle";
 const isEraseTool = (t: Tool) => t === "eraseObj" || t === "eraseSeg";
 const isDimTool = (t: Tool) => t === "dimLength" || t === "dimAngle" || t === "dimCircle";
@@ -5122,11 +5127,16 @@ export default function ProjectCanvas({
                   .flatMap((p) => p.sketches)
                   .find((s) => s.id === activeSketchId)?.name}
               </span>
-              <div className="flex items-center gap-0.5 rounded-lg border border-gray-300 bg-white p-0.5">
-                {TOOL_DEFS.map((t) => (
-                  <div key={t.id} className="flex items-center gap-0.5">
-                    {TOOL_GROUP_STARTS.includes(t.id) && <span className="w-px h-6 mx-0.5 bg-gray-200" />}
+              {/* 도구 묶음(그리기·지우개·치수·투영)을 따로 두어, 폰 세로 화면처럼 좁으면
+                  묶음 단위로 다음 줄에 내려간다(가로 스크롤로 숨기지 않음) */}
+              {TOOL_GROUPS.map((group) => (
+                <div
+                  key={group[0].id}
+                  className="flex items-center gap-0.5 rounded-lg border border-gray-300 bg-white p-0.5"
+                >
+                  {group.map((t) => (
                     <button
+                      key={t.id}
                       onClick={() => handleSetTool(t.id)}
                       title={t.title}
                       aria-label={t.title}
@@ -5137,9 +5147,9 @@ export default function ProjectCanvas({
                     >
                       <ToolIcon kind={t.id} />
                     </button>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ))}
               <button
                 onClick={resetView}
                 className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md border border-gray-300 bg-white text-gray-600"
@@ -5353,13 +5363,14 @@ export default function ProjectCanvas({
           )}
         </div>
 
-        <div className="px-4 py-1 text-[11px] text-gray-400 flex gap-4 bg-[#faf6ee]/85 backdrop-blur-sm">
-          <span className="px-1.5 py-0.5 rounded bg-gray-900/5 text-gray-600 font-medium">
+        {/* 좁은 화면에서는 짧은 항목은 한 줄로 두고 긴 안내문만 다음 줄에서 줄바꿈 */}
+        <div className="px-4 py-1 text-[11px] text-gray-400 flex flex-wrap items-center gap-x-4 gap-y-0.5 bg-[#faf6ee]/85 backdrop-blur-sm">
+          <span className="px-1.5 py-0.5 rounded bg-gray-900/5 text-gray-600 font-medium whitespace-nowrap">
             단위: mm
           </span>
           {mode === "sketch" && (
             <>
-              <span>
+              <span className="whitespace-nowrap">
                 선 {strokeCount}개 · 점 {pointCount}개
               </span>
               {cursorMm && activePlane && (() => {
@@ -5367,7 +5378,7 @@ export default function ProjectCanvas({
                 const o = toLocalUV(activePlane, vecMm(sketchOriginMm(activePlane)));
                 const c = toLocalUV(activePlane, vecMm(cursorMm));
                 return (
-                  <span>
+                  <span className="whitespace-nowrap">
                     커서: 가로 {sceneToMm(c.u - o.u)}, 세로 {sceneToMm(c.v - o.v)} mm
                   </span>
                 );
