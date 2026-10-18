@@ -4319,6 +4319,53 @@ export default function ProjectCanvas({
     controls.update();
   }
 
+  // 대상(controls.target)을 중심으로 카메라를 돌린다. 월드 Z가 위인 상태를 유지한다.
+  // OrbitControls의 회전과 같은 속도(캔버스 높이 한 번 끌면 한 바퀴)·같은 방향이다.
+  function orbitCamera(deltaXPx: number, deltaYPx: number) {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    const mount = mountRef.current;
+    if (!camera || !controls || !mount) return;
+
+    const offset = camera.position.clone().sub(controls.target);
+    const radius = offset.length();
+    if (radius < 1e-9) return;
+    const k = (2 * Math.PI) / mount.clientHeight;
+    const theta = Math.atan2(offset.y, offset.x) - deltaXPx * k;
+    const phi = Math.min(Math.PI - 0.01, Math.max(0.01, Math.acos(offset.z / radius) - deltaYPx * k));
+    camera.position.set(
+      controls.target.x + radius * Math.sin(phi) * Math.cos(theta),
+      controls.target.y + radius * Math.sin(phi) * Math.sin(theta),
+      controls.target.z + radius * Math.cos(phi)
+    );
+    camera.up.set(0, 0, 1);
+    camera.lookAt(controls.target);
+    controls.update();
+  }
+
+  // 맥북 트랙패드: 두 손가락 드래그는 브라우저에 휠 이벤트로 들어온다.
+  //   Shift + 두 손가락 드래그 = 이동, Option(Alt) + 두 손가락 드래그 = 회전
+  //   (키 없이 두 손가락 스크롤·핀치는 지금처럼 확대/축소)
+  // OrbitControls보다 먼저 받아서(capture) 키를 누른 경우에만 가로챈다.
+  // 손가락 방향을 따라가도록 휠 값의 부호를 뒤집는다(OS의 자연스러운 스크롤 설정은 이미 반영돼 있다).
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.shiftKey && !e.altKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // 마우스 휠(줄 단위)·페이지 단위도 픽셀로 맞춘다
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? mount.clientHeight : 1;
+      const dx = -e.deltaX * unit;
+      const dy = -e.deltaY * unit;
+      if (e.altKey) orbitCamera(dx, dy);
+      else panCamera(dx, dy);
+    };
+    mount.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    return () => mount.removeEventListener("wheel", onWheel, { capture: true });
+  }, []);
+
   function threeFingerPanCentroid(): { x: number; y: number } | null {
     if (activePointerIdsRef.current.size !== 3) return null;
     let sx = 0;
